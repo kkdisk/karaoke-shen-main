@@ -1,0 +1,7 @@
+# Separate Python 3.10/3.11 environment; never install into the desktop env.
+numpy==1.26.4
+torch==2.10.0
+torchaudio==2.10.0
+demucs==4.0.1
+imageio-ffmpeg==0.6.0
+soundfile==0.13.1
