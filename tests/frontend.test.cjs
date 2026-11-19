@@ -422,9 +422,41 @@ async function run() {
   const secondBtn = nodes.get('playlist-items').children[1].children[0];
   assert.equal(secondBtn.children[0].tagName, 'IMG');
   assert.equal(secondBtn.children[1].children[0].textContent, 'Two');
-  assert.equal(secondBtn.children[1].children[1].className, 'now-badge');
+  assert.equal(secondBtn.children[1].children[1].className, 'meta');
+  assert.equal(secondBtn.children[1].children[1].children[0].className, 'now-badge');
   assert.equal(secondBtn.children[2].textContent, '02');
   assert.equal(nodes.get('playlist-items').children[1].classList.contains('active'), true);
+
+  // Phase 4: song duration (sanitized, backwards compatible with old saved lists)
+  const { formatDuration, safeDuration } = await import(
+    pathToFileURL(path.join(__dirname, '../web/js/validation.js')).href
+  );
+  assert.equal(formatDuration(211), '3:31');
+  assert.equal(formatDuration(3725), '1:02:05');
+  assert.equal(formatDuration(null), '');
+  assert.equal(safeDuration('211'), null);
+  assert.equal(safeDuration(-1), null);
+  assert.equal(safeDuration(Infinity), null);
+  assert.equal(safeDuration(25 * 3600), null);
+  assert.equal(sanitize({ id: 'dQw4w9WgXcQ', title: 'Old' }).duration, null);
+  assert.equal(sanitize({ id: 'dQw4w9WgXcQ', title: 'New', duration: 211.4 }).duration, 211);
+
+  const { queueSummary } = await import(pathToFileURL(path.join(__dirname, '../web/js/main.js')).href);
+  assert.equal(queueSummary([]).text, '0 首');
+  assert.equal(queueSummary([{ duration: 600 }, { duration: 850 }]).text, '2 首 · 24:10');
+  assert.equal(queueSummary([{ duration: 600 }, {}]).text, '2 首 · 10:00+');
+  assert.equal(queueSummary([{}, {}]).text, '2 首');
+  assert.equal(queueSummary([{ duration: 86400 }, { duration: 3600 }]).text, '2 首 · 25:00:00');
+
+  app.setState({
+    playlist: [sanitize({ id: 'dQw4w9WgXcQ', title: 'One', duration: 211 }), sanitize({ id: 'abcdefghijk', title: 'Two' })],
+    currentIndex: -1,
+  });
+  app.renderPlaylist();
+  assert.equal(nodes.get('queue-count').textContent, '2 首 · 3:31+');
+  const firstMeta = nodes.get('playlist-items').children[0].children[0].children[1].children[1];
+  assert.equal(firstMeta.children[1].textContent, '3:31');
+  assert.equal(nodes.get('playlist-items').children[1].children[0].children[1].children[1].children.length, 1); // badge only
 
   // Actual playback quality label
   const { videoQualityLabel } = await import(pathToFileURL(path.join(__dirname, '../web/js/main.js')).href);

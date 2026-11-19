@@ -45,6 +45,20 @@ _info_cache = OrderedDict()
 log = logging.getLogger('karaoke')
 
 
+MAX_DURATION_SECONDS = 24 * 60 * 60
+
+
+def _duration_seconds(value):
+    """Whole seconds in (0, 24h], or None for live streams / missing / bogus values."""
+    if isinstance(value, bool):
+        return None
+    try:
+        seconds = int(round(float(value)))
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return seconds if 0 < seconds <= MAX_DURATION_SECONDS else None
+
+
 def _video_item(info):
     video_id = info.get('id')
     if not valid_video_id(video_id):
@@ -52,7 +66,8 @@ def _video_item(info):
     thumbs = info.get('thumbnails') or []
     return {'id': video_id, 'title': info.get('title') or video_id,
             'thumbnail': info.get('thumbnail') or (thumbs[-1].get('url') if thumbs else ''),
-            'url': f'https://www.youtube.com/watch?v={video_id}'}
+            'url': f'https://www.youtube.com/watch?v={video_id}',
+            'duration': _duration_seconds(info.get('duration'))}
 
 
 @eel.expose

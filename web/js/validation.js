@@ -32,11 +32,31 @@ export function validItem(item) {
   );
 }
 
+export const MAX_DURATION_SECONDS = 24 * 60 * 60;
+
+/** Whole seconds in (0, 24h], or null. Older saved/imported playlists have no duration. */
+export function safeDuration(value) {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return null;
+  const seconds = Math.round(value);
+  return seconds > 0 && seconds <= MAX_DURATION_SECONDS ? seconds : null;
+}
+
+/** 211 → "3:31", 3725 → "1:02:05". */
+export function formatDuration(seconds) {
+  const total = safeDuration(seconds);
+  if (total === null) return '';
+  const h = Math.floor(total / 3600);
+  const m = Math.floor((total % 3600) / 60);
+  const s = String(total % 60).padStart(2, '0');
+  return h ? `${h}:${String(m).padStart(2, '0')}:${s}` : `${m}:${s}`;
+}
+
 export function sanitize(item) {
   return {
     id: item.id,
     title: item.title,
     thumbnail: safeThumbnail(item.thumbnail),
     url: `https://www.youtube.com/watch?v=${item.id}`,
+    duration: safeDuration(item.duration),
   };
 }

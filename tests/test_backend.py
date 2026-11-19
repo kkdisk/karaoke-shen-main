@@ -39,6 +39,13 @@ def call_route(path, query='', extra=None):
 
 
 class BackendTests(unittest.TestCase):
+    def test_video_item_duration(self):
+        item = main._video_item({'id': VIDEO, 'title': 't', 'duration': 211.6})
+        self.assertEqual(item['duration'], 212)
+        for bad in (None, 0, -5, 'abc', float('nan'), float('inf'), True, 25 * 3600):
+            self.assertIsNone(main._video_item({'id': VIDEO, 'duration': bad})['duration'], bad)
+        self.assertIsNone(main._video_item({'id': VIDEO})['duration'])
+
     def test_demucs_progress_handles_cr_partial_lines_and_model_download(self):
         callback = Mock()
         parser = WorkerProgress(callback)

@@ -1081,6 +1081,27 @@ video {
   color: var(--primary-color);
 }
 
+.meta {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 0;
+}
+
+.meta:empty {
+  display: none;
+}
+
+.duration {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.result-card .meta {
+  margin-top: 6px;
+}
+
 .playlist-item.active .now-badge {
   display: inline-flex;
 }

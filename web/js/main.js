@@ -13,7 +13,9 @@ import {
   MAX_PLAYLIST_SIZE,
   QUALITY_STORAGE_KEY,
   STORAGE_KEY,
+  formatDuration,
   normalizeQuality,
+  safeDuration,
   safeThumbnail,
   sanitize,
   validItem,
@@ -69,6 +71,21 @@ export function videoQualityLabel(width, height) {
 
 function trackNumber(index) {
   return String(index + 1).padStart(2, '0');
+}
+
+/** "6 首 · 24:10"; a trailing "+" means some songs have no known duration (e.g. old saved lists). */
+export function queueSummary(items) {
+  const count = `${items.length} 首`;
+  const known = items.map(item => safeDuration(item.duration)).filter(d => d !== null);
+  if (!known.length) return { text: count, partial: false };
+  const total = known.reduce((sum, d) => sum + d, 0);
+  const partial = known.length < items.length;
+  // The sum may exceed 24h, so format it directly rather than through safeDuration.
+  const h = Math.floor(total / 3600);
+  const m = Math.floor((total % 3600) / 60);
+  const s = String(total % 60).padStart(2, '0');
+  const time = h ? `${h}:${String(m).padStart(2, '0')}:${s}` : `${m}:${s}`;
+  return { text: `${count} · ${time}${partial ? '+' : ''}`, partial };
 }
 
 export function createApp({ doc = globalThis.document, storage = globalThis.localStorage, audioEngine: customAudio, spectrum: customSpectrum } = {}) {
@@ -231,7 +248,7 @@ export function createApp({ doc = globalThis.document, storage = globalThis.loca
         : '';
   }
 
-  function songContent(item, parent) {
+  function songContent(item, parent, { badge = false } = {}) {
     const img = doc.createElement('img');
     const thumb = safeThumbnail(item.thumbnail);
     if (thumb) img.src = thumb;
@@ -244,7 +261,18 @@ export function createApp({ doc = globalThis.document, storage = globalThis.loca
     const title = doc.createElement('div');
     title.className = 'title';
     title.textContent = item.title;
-    info.append(title);
+    // meta row: [now-playing badge (playlist only)] [duration]
+    const meta = doc.createElement('div');
+    meta.className = 'meta';
+    if (badge) meta.append(nowPlayingBadge());
+    const length = formatDuration(item.duration);
+    if (length) {
+      const duration = doc.createElement('span');
+      duration.className = 'duration';
+      duration.textContent = length;
+      meta.append(duration);
+    }
+    info.append(title, meta);
     parent.append(img, info);
     return info;
   }
@@ -327,7 +355,11 @@ export function createApp({ doc = globalThis.document, storage = globalThis.loca
   function renderPlaylist() {
     const list = $('playlist-items');
     list.replaceChildren();
-    $('queue-count').textContent = `${playlist.length} 首`;
+    const summary = queueSummary(playlist);
+    const count = $('queue-count');
+    count.textContent = summary.text;
+    if (summary.partial) count.setAttribute('title', '部分歌曲（舊清單）沒有時長資料');
+    else count.removeAttribute('title');
 
     playlist.forEach((item, index) => {
       const row = doc.createElement('li');
@@ -339,9 +371,8 @@ export function createApp({ doc = globalThis.document, storage = globalThis.loca
       playBtn.className = 'playlist-play-btn';
       playBtn.setAttribute('aria-label', `播放 ${item.title}`);
       if (index === currentIndex) playBtn.setAttribute('aria-current', 'true');
-      // Keep children[0] = thumbnail, children[1] = info (title first); the number is placed with CSS `order`.
-      const info = songContent(item, playBtn);
-      info.append(nowPlayingBadge());
+      // Keep children[0] = thumbnail, children[1] = info (title, then meta: badge + duration); the number is placed with CSS `order`.
+      songContent(item, playBtn, { badge: true });
       const number = doc.createElement('span');
       number.className = 'track-no';
       number.setAttribute('aria-hidden', 'true');
