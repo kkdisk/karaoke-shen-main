@@ -42,6 +42,7 @@ function qualityLabel(quality) {
 }
 
 const PANELS_STORAGE_KEY = 'shen-panels-v1';
+const SEARCH_HINT = '搜尋歌曲或匯入清單，開始歡唱';
 const TOAST_MS = 3200;
 
 const AI_SUMMARY_LABELS = {
@@ -126,6 +127,11 @@ export function createApp({ doc = globalThis.document, storage = globalThis.loca
     const wrap = $('app-error-wrap');
     if (wrap) wrap.hidden = true;
     $('app-error').textContent = '';
+  }
+
+  /** Freeze the now-playing sound bars unless the player is actually playing. */
+  function setPlayingAnimation(playing) {
+    $('playlist-items').classList.toggle('is-paused', !playing);
   }
 
   function setAIStatus(message) {
@@ -397,6 +403,13 @@ export function createApp({ doc = globalThis.document, storage = globalThis.loca
       empty.textContent = '搜尋歌曲，開始你的歡唱清單';
       list.append(empty);
     }
+    // The onboarding hint is only useful while the queue is empty.
+    const searchStatus = $('search-status');
+    if (searchStatus) {
+      if (playlist.length && searchStatus.textContent === SEARCH_HINT) setSearchStatus('');
+      else if (!playlist.length && !searchStatus.textContent) setSearchStatus(SEARCH_HINT);
+    }
+    setPlayingAnimation(!player.paused);
     persist();
   }
 
@@ -582,7 +595,10 @@ export function createApp({ doc = globalThis.document, storage = globalThis.loca
       const url = await rpc('get_stream_url', item.id, selectedQuality);
       if (token !== playRequestId) return;
       await loadSource(url, token);
-      if (token === playRequestId) setPlayStatus('播放中');
+      if (token === playRequestId) {
+        setPlayStatus('播放中');
+        clearError();
+      }
     } catch (error) {
       if (token === playRequestId && error.name !== 'AbortError') {
         setPlayStatus('播放失敗');
@@ -677,6 +693,7 @@ export function createApp({ doc = globalThis.document, storage = globalThis.loca
 
     $('search-btn').disabled = true;
     $('search-loader').hidden = false;
+    clearError();
     setSearchStatus('搜尋中…');
     try {
       if (/^https?:\/\//i.test(query)) {
@@ -895,11 +912,13 @@ export function createApp({ doc = globalThis.document, storage = globalThis.loca
       audio.init();
       audio.resume().catch(error => showError(error.message));
       setMediaSessionPlaybackState('playing');
+      setPlayingAnimation(true);
       if (!sourcePending) setPlayStatus('播放中');
       applyMode();
     };
     player.onpause = () => {
       setMediaSessionPlaybackState('paused');
+      setPlayingAnimation(false);
       if (!sourcePending && player.hasAttribute('src')) setPlayStatus('已暫停');
       spectrum.stop();
     };
@@ -997,6 +1016,7 @@ export function createApp({ doc = globalThis.document, storage = globalThis.loca
           if (!valid.length) throw new Error('沒有有效歌曲，或清單已滿');
           playlist.push(...valid);
           renderPlaylist();
+          clearError();
           showToast(`匯入 ${valid.length} 首；略過 ${data.length - valid.length} 筆無效或超額項目`);
         } catch (error) {
           showError(`匯入失敗：${error.message}`);

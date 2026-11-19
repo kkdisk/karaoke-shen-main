@@ -444,6 +444,30 @@ async function run() {
   nodes.get('app-error-close').onclick();
   assert.equal(nodes.get('app-error-wrap').hidden, true);
 
+  // A later successful playback clears a stale error
+  app.addSong({ id: 'bad', title: 'x' });
+  assert.equal(nodes.get('app-error-wrap').hidden, false);
+  globalThis.eel.get_stream_url = id => () => Promise.resolve(`/proxy_stream?v=${id}`);
+  app.setState({ playlist: [sanitize({ id: 'dQw4w9WgXcQ', title: 'One' })], currentIndex: -1 });
+  await app.playSong(0);
+  assert.equal(nodes.get('app-error-wrap').hidden, true);
+  assert.equal(nodes.get('app-error').textContent, '');
+
+  // Sound bars freeze while paused
+  nodes.get('player').onpause();
+  assert.equal(nodes.get('playlist-items').classList.contains('is-paused'), true);
+  nodes.get('player').onplay();
+  assert.equal(nodes.get('playlist-items').classList.contains('is-paused'), false);
+
+  // Onboarding hint shows only while the queue is empty
+  app.setState({ playlist: [], currentIndex: -1 });
+  nodes.get('search-status').textContent = '';
+  app.renderPlaylist();
+  assert.equal(nodes.get('search-status').textContent, '搜尋歌曲或匯入清單，開始歡唱');
+  app.setState({ playlist: [sanitize({ id: 'dQw4w9WgXcQ', title: 'One' })] });
+  app.renderPlaylist();
+  assert.equal(nodes.get('search-status').textContent, '');
+
   // 11. Media Session handlers bound
   assert.equal(typeof mediaActions.play, 'function');
   assert.equal(typeof mediaActions.nexttrack, 'function');

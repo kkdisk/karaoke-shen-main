@@ -61,7 +61,7 @@
 
 body {
   font-family: 'Inter', 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
-  background: radial-gradient(circle at 20% 20%, #1a1a2e 0%, #0a0a0c 100%) fixed;
+  background: radial-gradient(circle at 20% 20%, #1a1a2e 0%, #0a0a0c 100%);
   background-color: var(--bg-color);
   color: var(--text-color);
   min-height: 100vh;
@@ -612,7 +612,8 @@ video {
 /* Quick mix (singing mode only) */
 .quick-mix {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  /* auto-fit: when vocal reduction is hidden (AI accompaniment), gain fills the row */
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
   gap: 10px;
   animation: slideDown 0.25s ease;
 }
@@ -1098,6 +1099,10 @@ video {
   background: currentColor;
   transform-origin: bottom;
   animation: sound-bar 0.9s ease-in-out infinite;
+}
+
+.playlist-list.is-paused .sound-bars i {
+  animation-play-state: paused;
 }
 
 .sound-bars i:nth-child(2) {
