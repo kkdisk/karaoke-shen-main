@@ -41,6 +41,35 @@ function qualityLabel(quality) {
   return quality === 1440 ? '2K (1440p)' : `${quality}p`;
 }
 
+const PANELS_STORAGE_KEY = 'shen-panels-v1';
+const TOAST_MS = 3200;
+
+const AI_SUMMARY_LABELS = {
+  ready: '已就緒',
+  cancelled: '已取消',
+  error: '製作失敗',
+  unavailable: '無法使用',
+  busy: '忙碌中',
+};
+
+/** Classify the decoded video size into a short label (2K / 1080p / 720p …). */
+export function videoQualityLabel(width, height) {
+  const w = Number(width) || 0;
+  const h = Number(height) || 0;
+  if (!w || !h) return '';
+  // Landscape: treat ultra-wide (e.g. 1920×800) by its width; portrait: by its short side.
+  const lines = w >= h ? Math.max(h, Math.round((w * 9) / 16)) : w;
+  if (lines >= 2160) return '4K';
+  if (lines >= 1440) return '2K';
+  if (lines >= 1080) return '1080p';
+  if (lines >= 720) return '720p';
+  return `${lines}p`;
+}
+
+function trackNumber(index) {
+  return String(index + 1).padStart(2, '0');
+}
+
 export function createApp({ doc = globalThis.document, storage = globalThis.localStorage, audioEngine: customAudio, spectrum: customSpectrum } = {}) {
   const $ = id => doc.getElementById(id);
   const player = $('player');
@@ -55,23 +84,129 @@ export function createApp({ doc = globalThis.document, storage = globalThis.loca
   let sourceCleanup = null;
   let sourcePending = false;
   let aiAvailable = false;
+  let aiChecked = false;
   let wantsResume = false;
   let selectedQuality = DEFAULT_QUALITY;
 
   const audio = customAudio || new AudioEngine(player, id => $(`eq-${id}`)?.value ?? 0);
   const spectrum = customSpectrum || new SpectrumVisualizer($('spectrum-canvas'), $('spectrum-container'));
 
-  function notice(message, error = false) {
-    const status = $('app-status');
-    status.textContent = message;
-    status.classList.toggle('error', error);
+  let toastTimer = null;
+
+  /** Search feedback, shown under the search box. */
+  function setSearchStatus(message) {
+    const el = $('search-status');
+    if (el) el.textContent = message;
+  }
+
+  /** Playback state chip next to the song title (hidden when empty). */
+  function setPlayStatus(message) {
+    const el = $('play-status');
+    if (el) el.textContent = message;
+  }
+
+  /** Short-lived success / info message. */
+  function showToast(message) {
+    const toast = $('toast');
+    if (!toast) return;
+    toast.textContent = message;
+    toast.classList.add('show');
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => toast.classList.remove('show'), TOAST_MS);
+  }
+
+  /** Errors stay visible (and announced) until dismissed or replaced. */
+  function showError(message) {
+    const wrap = $('app-error-wrap');
+    if (wrap) wrap.hidden = false;
+    $('app-error').textContent = message;
+  }
+
+  function clearError() {
+    const wrap = $('app-error-wrap');
+    if (wrap) wrap.hidden = true;
+    $('app-error').textContent = '';
+  }
+
+  function setAIStatus(message) {
+    $('ai-status').textContent = message;
+  }
+
+  function renderAISummary(state, percent) {
+    const summary = $('ai-summary');
+    if (!summary) return;
+    let text = '';
+    if (AI_ACTIVE_STATES.includes(state)) {
+      text = AI_STAGE_LABELS[state] || '製作中';
+      if (typeof percent === 'number' && Number.isFinite(percent)) text += ` ${Math.round(percent)}%`;
+    } else {
+      text = AI_SUMMARY_LABELS[state] || '';
+    }
+    if (!text && aiChecked && !aiAvailable) text = AI_SUMMARY_LABELS.unavailable;
+    summary.textContent = text;
+    summary.className = `panel-summary${state === 'ready' ? ' ready' : ''}${state === 'error' ? ' error' : ''}`;
+  }
+
+  function renderQualityChip() {
+    const chip = $('now-quality');
+    if (!chip) return;
+    const label = player.hasAttribute('src') ? videoQualityLabel(player.videoWidth, player.videoHeight) : '';
+    chip.textContent = label;
+    chip.hidden = !label;
+    if (label) chip.setAttribute('title', `實際播放畫質 ${player.videoWidth}×${player.videoHeight}`);
+  }
+
+  function renderVolume() {
+    const vol = Number.isFinite(player.volume) ? player.volume : 1;
+    const muted = Boolean(player.muted);
+    const slider = $('volume-slider');
+    slider.value = vol;
+    slider.setAttribute('aria-valuetext', muted ? '靜音' : `${Math.round(vol * 100)}%`);
+    const output = $('volume-val');
+    if (output) output.textContent = muted ? '靜音' : `${Math.round(vol * 100)}%`;
+    const icon = $('volume-icon');
+    if (icon) icon.textContent = muted || vol === 0 ? '🔇' : vol < 0.5 ? '🔉' : '🔊';
+    const muteBtn = $('mute-btn');
+    if (muteBtn) {
+      muteBtn.setAttribute('aria-pressed', String(muted));
+      muteBtn.setAttribute('aria-label', muted ? '取消靜音' : '靜音');
+    }
+  }
+
+  function eqPanelOpen() {
+    const panel = $('eq-panel');
+    return Boolean(panel && !panel.hidden && panel.open);
+  }
+
+  function restorePanels() {
+    let state = {};
+    try {
+      state = JSON.parse(storage.getItem(PANELS_STORAGE_KEY) || '{}') || {};
+    } catch {
+      /* corrupt or blocked storage */
+    }
+    if (typeof state.ai === 'boolean') $('ai-details').open = state.ai;
+    if (typeof state.eq === 'boolean') $('eq-panel').open = state.eq;
+  }
+
+  function persistPanels() {
+    try {
+      storage.setItem(
+        PANELS_STORAGE_KEY,
+        JSON.stringify({ ai: Boolean($('ai-details').open), eq: Boolean($('eq-panel').open) })
+      );
+    } catch {
+      /* quota/private mode */
+    }
   }
 
   function renderAIProgress(result) {
+    renderAISummary(result.state, result.progress);
     const active = AI_ACTIVE_STATES.includes(result.state);
     $('ai-progress').hidden = !active && result.state !== 'ready';
     $('ai-progress-panel').hidden = !active && !['ready', 'cancelled', 'error'].includes(result.state);
     $('ai-progress-stage').textContent = AI_STAGE_LABELS[result.state] || '';
+    $('ai-progress-panel').classList.toggle('ready', result.state === 'ready');
 
     const percent = result.progress;
     if (typeof percent === 'number' && Number.isFinite(percent)) {
@@ -105,6 +240,32 @@ export function createApp({ doc = globalThis.document, storage = globalThis.loca
     title.textContent = item.title;
     info.append(title);
     parent.append(img, info);
+    return info;
+  }
+
+  function nowPlayingBadge() {
+    const badge = doc.createElement('span');
+    badge.className = 'now-badge';
+    const bars = doc.createElement('span');
+    bars.className = 'sound-bars';
+    bars.setAttribute('aria-hidden', 'true');
+    bars.append(doc.createElement('i'), doc.createElement('i'), doc.createElement('i'));
+    const label = doc.createElement('span');
+    label.textContent = '♪ 播放中';
+    badge.append(bars, label);
+    return badge;
+  }
+
+  /** Scroll only the playlist container (never the page) so the active row is visible. */
+  function scrollActiveIntoView() {
+    const list = $('playlist-items');
+    const row = list.children?.[currentIndex];
+    if (!row || typeof list.scrollTo !== 'function') return;
+    const top = row.offsetTop;
+    const bottom = top + row.offsetHeight;
+    if (top >= list.scrollTop && bottom <= list.scrollTop + list.clientHeight) return;
+    const reduce = globalThis.matchMedia?.('(prefers-reduced-motion: reduce)')?.matches;
+    list.scrollTo({ top: Math.max(0, top - 8), behavior: reduce ? 'auto' : 'smooth' });
   }
 
   function persist() {
@@ -172,7 +333,14 @@ export function createApp({ doc = globalThis.document, storage = globalThis.loca
       playBtn.className = 'playlist-play-btn';
       playBtn.setAttribute('aria-label', `播放 ${item.title}`);
       if (index === currentIndex) playBtn.setAttribute('aria-current', 'true');
-      songContent(item, playBtn);
+      // Keep children[0] = thumbnail, children[1] = info (title first); the number is placed with CSS `order`.
+      const info = songContent(item, playBtn);
+      info.append(nowPlayingBadge());
+      const number = doc.createElement('span');
+      number.className = 'track-no';
+      number.setAttribute('aria-hidden', 'true');
+      number.textContent = trackNumber(index);
+      playBtn.append(number);
       playBtn.onclick = event => {
         if (event?.detail > 0) playBtn.blur?.();
         playSong(index);
@@ -245,7 +413,9 @@ export function createApp({ doc = globalThis.document, storage = globalThis.loca
     aiMedia = null;
     usingAI = false;
     $('now-playing-title').textContent = '尚未播放歌曲';
-    $('ai-status').textContent = '選擇歌曲後可製作 AI 伴奏';
+    setPlayStatus('');
+    renderQualityChip();
+    setAIStatus('選擇歌曲後可製作 AI 伴奏');
     renderAIProgress({ state: 'idle' });
     $('prepare-ai-btn').disabled = true;
     $('clear-ai-cache-btn').hidden = true;
@@ -283,7 +453,7 @@ export function createApp({ doc = globalThis.document, storage = globalThis.loca
 
   function addSong(item) {
     if (!validItem(item) || playlist.length >= MAX_PLAYLIST_SIZE) {
-      notice(`清單上限為 ${MAX_PLAYLIST_SIZE} 首，或歌曲資料無效`, true);
+      showError(`清單上限為 ${MAX_PLAYLIST_SIZE} 首，或歌曲資料無效`);
       return;
     }
     playlist.push(sanitize(item));
@@ -292,12 +462,14 @@ export function createApp({ doc = globalThis.document, storage = globalThis.loca
   }
 
   function applyMode() {
-    const knob = $('karaoke-knob');
-    knob.classList.toggle('active', singing);
-    knob.setAttribute('aria-checked', String(singing));
-    $('label-guide').classList.toggle('active', !singing);
-    $('label-singing').classList.toggle('active', singing);
+    const guideBtn = $('mode-guide');
+    const singingBtn = $('mode-singing');
+    guideBtn.classList.toggle('active', !singing);
+    guideBtn.setAttribute('aria-pressed', String(!singing));
+    singingBtn.classList.toggle('active', singing);
+    singingBtn.setAttribute('aria-pressed', String(singing));
     $('eq-panel').hidden = !singing;
+    $('quick-mix').hidden = !singing;
     $('quick-controls').hidden = usingAI;
     $('mode-detail').textContent = usingAI
       ? 'AI 分離：保留立體聲伴奏；仍可能有分離瑕疵'
@@ -315,7 +487,8 @@ export function createApp({ doc = globalThis.document, storage = globalThis.loca
       accompanimentGain: $('accompaniment-gain').value,
     });
 
-    if (singing && !player.paused && !doc.hidden) {
+    // Only draw the 60fps spectrum while the EQ panel is actually expanded.
+    if (singing && eqPanelOpen() && !player.paused && !doc.hidden) {
       spectrum.start(audio.analyser);
     } else {
       spectrum.stop();
@@ -363,7 +536,7 @@ export function createApp({ doc = globalThis.document, storage = globalThis.loca
     if (position && player.seekable.length && Number.isFinite(player.duration)) {
       player.currentTime = Math.min(position, Math.max(0, player.duration - 0.1));
     } else if (position) {
-      notice('此串流無法跳轉，已從開頭播放。AI 快取影片支援拖曳進度。');
+      showToast('此串流無法跳轉，已從開頭播放。AI 快取影片支援拖曳進度。');
     }
 
     applyMode();
@@ -393,12 +566,14 @@ export function createApp({ doc = globalThis.document, storage = globalThis.loca
     renderAIProgress({ state: 'idle' });
     $('cancel-ai-btn').hidden = true;
     $('clear-ai-cache-btn').hidden = true;
-    $('ai-status').textContent = '正在取得這首歌曲的 AI 處理狀態…';
+    setAIStatus('正在取得這首歌曲的 AI 處理狀態…');
     $('prepare-ai-btn').disabled = !aiAvailable;
     $('now-playing-title').textContent = item.title;
+    renderQualityChip();
 
     updateActiveRow();
-    notice('正在準備播放…');
+    scrollActiveIntoView();
+    setPlayStatus('準備中…');
     applyMode();
 
     try {
@@ -407,10 +582,11 @@ export function createApp({ doc = globalThis.document, storage = globalThis.loca
       const url = await rpc('get_stream_url', item.id, selectedQuality);
       if (token !== playRequestId) return;
       await loadSource(url, token);
-      if (token === playRequestId) notice(`播放中（上限 ${qualityLabel(selectedQuality)}）；可切換導唱或歡唱`);
+      if (token === playRequestId) setPlayStatus('播放中');
     } catch (error) {
       if (token === playRequestId && error.name !== 'AbortError') {
-        notice(`播放失敗：${error.message}`, true);
+        setPlayStatus('播放失敗');
+        showError(`播放失敗：${error.message}`);
       }
     }
     if (token === playRequestId) pollAI(item.id, token);
@@ -422,7 +598,7 @@ export function createApp({ doc = globalThis.document, storage = globalThis.loca
     } else {
       stopPlayback();
       updateActiveRow();
-      notice('清單已播放完畢');
+      setPlayStatus('清單已播放完畢');
     }
   }
 
@@ -439,7 +615,7 @@ export function createApp({ doc = globalThis.document, storage = globalThis.loca
     try {
       const result = await rpc('accompaniment_status', id);
       if (token !== playRequestId) return;
-      $('ai-status').textContent = result.message;
+      setAIStatus(result.message);
       renderAIProgress(result);
       $('cancel-ai-btn').hidden = !AI_ACTIVE_STATES.includes(result.state);
       $('clear-ai-cache-btn').hidden = result.state !== 'ready';
@@ -455,16 +631,23 @@ export function createApp({ doc = globalThis.document, storage = globalThis.loca
       }
     } catch (error) {
       if (token === playRequestId) {
-        $('ai-status').textContent = `無法取得處理狀態，稍後重試：${error.message}`;
+        setAIStatus(`無法取得處理狀態，稍後重試：${error.message}`);
         pollTimer = setTimeout(() => pollAI(id, token), 3000);
       }
     }
   }
 
-  async function changeMode() {
-    singing = !singing;
+  /** Idempotent: selecting the already-active mode does nothing. */
+  async function setMode(isSinging) {
+    const next = Boolean(isSinging);
+    if (next === singing) return;
+    singing = next;
     if (usingAI) await switchAI();
     else applyMode();
+  }
+
+  function changeMode() {
+    return setMode(!singing);
   }
 
   async function switchAI() {
@@ -479,7 +662,7 @@ export function createApp({ doc = globalThis.document, storage = globalThis.loca
       const url = usingAI ? (singing ? aiMedia.karaoke : aiMedia.original) : aiMedia.original;
       await loadSource(url, token, position, resume);
     } catch (error) {
-      if (token === playRequestId) notice(`切換失敗：${error.message}`, true);
+      if (token === playRequestId) showError(`切換失敗：${error.message}`);
     }
   }
 
@@ -488,15 +671,17 @@ export function createApp({ doc = globalThis.document, storage = globalThis.loca
     const query = $('search-input').value.trim();
     if (!query || $('search-btn').disabled) return;
     if (!hasBackend()) {
-      notice('請以 Python 或桌面程式啟動，搜尋需要本機後端', true);
+      showError('請以 Python 或桌面程式啟動，搜尋需要本機後端');
       return;
     }
 
     $('search-btn').disabled = true;
     $('search-loader').hidden = false;
+    setSearchStatus('搜尋中…');
     try {
       if (/^https?:\/\//i.test(query)) {
         addSong(await rpc('get_video_info', query));
+        setSearchStatus('已加入網址歌曲');
       } else {
         const results = await rpc('search_youtube', query);
         const grid = $('results-grid');
@@ -513,10 +698,11 @@ export function createApp({ doc = globalThis.document, storage = globalThis.loca
           };
           grid.append(card);
         });
-        notice(results.length ? `找到 ${results.length} 首，點選加入清單` : '沒有找到歌曲，請換個關鍵字');
+        setSearchStatus(results.length ? `找到 ${results.length} 首，點選加入清單` : '沒有找到歌曲，請換個關鍵字');
       }
     } catch (error) {
-      notice(`搜尋失敗：${error.message || error}`, true);
+      setSearchStatus('');
+      showError(`搜尋失敗：${error.message || error}`);
     } finally {
       $('search-btn').disabled = false;
       $('search-loader').hidden = true;
@@ -527,7 +713,7 @@ export function createApp({ doc = globalThis.document, storage = globalThis.loca
     playlist = [];
     stopPlayback();
     renderPlaylist();
-    notice('已清空待播清單');
+    showToast('已清空待播清單');
   }
 
   function bindEvents() {
@@ -560,8 +746,18 @@ export function createApp({ doc = globalThis.document, storage = globalThis.loca
       }
     }
 
-    $('karaoke-knob').onclick = changeMode;
+    $('mode-guide').onclick = () => setMode(false);
+    $('mode-singing').onclick = () => setMode(true);
     $('use-ai').onchange = switchAI;
+
+    const errorClose = $('app-error-close');
+    if (errorClose) errorClose.onclick = clearError;
+
+    $('ai-details').addEventListener('toggle', persistPanels);
+    $('eq-panel').addEventListener('toggle', () => {
+      persistPanels();
+      applyMode();
+    });
 
     const qualitySelect = $('quality-select');
     if (qualitySelect) {
@@ -569,7 +765,7 @@ export function createApp({ doc = globalThis.document, storage = globalThis.loca
         selectedQuality = normalizeQuality(qualitySelect.value, DEFAULT_QUALITY);
         qualitySelect.value = String(selectedQuality);
         persistQuality();
-        notice(`已設定畫質上限為 ${qualityLabel(selectedQuality)}`);
+        showToast(`已設定畫質上限為 ${qualityLabel(selectedQuality)}`);
         if (currentIndex >= 0 && !usingAI) {
           await playSong(currentIndex);
         }
@@ -581,11 +777,12 @@ export function createApp({ doc = globalThis.document, storage = globalThis.loca
       const token = playRequestId;
       if (!item) return;
       $('prepare-ai-btn').disabled = true;
+      $('ai-details').open = true;
       renderAIProgress({ state: 'downloading', detail: '正在啟動工作…' });
       try {
         const result = await rpc('prepare_accompaniment', item.id, selectedQuality);
         if (token !== playRequestId) return;
-        $('ai-status').textContent = result.message;
+        setAIStatus(result.message);
         renderAIProgress(result);
         if (['busy', 'unavailable', 'error'].includes(result.state)) {
           $('prepare-ai-btn').disabled = !aiAvailable;
@@ -594,7 +791,7 @@ export function createApp({ doc = globalThis.document, storage = globalThis.loca
         pollAI(item.id, token);
       } catch (error) {
         if (token === playRequestId) {
-          $('ai-status').textContent = error.message;
+          setAIStatus(error.message);
           $('prepare-ai-btn').disabled = !aiAvailable;
           renderAIProgress({ state: 'error' });
         }
@@ -608,11 +805,11 @@ export function createApp({ doc = globalThis.document, storage = globalThis.loca
       try {
         const result = await rpc('cancel_accompaniment', item.id);
         if (token === playRequestId) {
-          $('ai-status').textContent = result.message;
+          setAIStatus(result.message);
           renderAIProgress(result);
         }
       } catch (error) {
-        if (token === playRequestId) notice(error.message, true);
+        if (token === playRequestId) showError(error.message);
       }
     };
 
@@ -637,7 +834,7 @@ export function createApp({ doc = globalThis.document, storage = globalThis.loca
         try {
           const result = await rpc('clear_accompaniment_cache', item.id);
           if (token !== playRequestId) return;
-          $('ai-status').textContent = result.message;
+          setAIStatus(result.message);
           if (result.state === 'idle') {
             aiMedia = null;
             usingAI = false;
@@ -646,10 +843,10 @@ export function createApp({ doc = globalThis.document, storage = globalThis.loca
             clearCacheBtn.hidden = true;
             $('prepare-ai-btn').disabled = !aiAvailable;
             renderAIProgress({ state: 'idle' });
-            notice('已清除此首快取，可切換畫質上限後按「製作 AI 伴奏」重新下載');
+            showToast('已清除此首快取，可切換畫質上限後按「製作 AI 伴奏」重新下載');
             if (wasUsingAI) await playSong(currentIndex);
           } else {
-            notice(result.message, true);
+            showError(result.message);
             if (wasUsingAI && aiMedia) {
               $('use-ai').checked = true;
               usingAI = true;
@@ -660,7 +857,7 @@ export function createApp({ doc = globalThis.document, storage = globalThis.loca
           }
         } catch (error) {
           if (token === playRequestId) {
-            notice(`清除快取失敗：${error.message}`, true);
+            showError(`清除快取失敗：${error.message}`);
             if (wasUsingAI && aiMedia) {
               $('use-ai').checked = true;
               usingAI = true;
@@ -678,38 +875,47 @@ export function createApp({ doc = globalThis.document, storage = globalThis.loca
     $('volume-slider').oninput = event => {
       const vol = Number(event.target.value);
       player.volume = vol;
-      $('volume-slider').setAttribute('aria-valuetext', `${Math.round(vol * 100)}%`);
+      if (vol > 0 && player.muted) player.muted = false;
+      renderVolume();
     };
 
-    player.onvolumechange = () => {
-      const vol = player.muted ? 0 : player.volume;
-      $('volume-slider').value = vol;
-      $('volume-slider').setAttribute('aria-valuetext', `${Math.round(vol * 100)}%`);
-    };
+    const muteBtn = $('mute-btn');
+    if (muteBtn) {
+      muteBtn.onclick = () => {
+        player.muted = !player.muted;
+        renderVolume();
+      };
+    }
+
+    player.onvolumechange = renderVolume;
+    player.addEventListener('loadedmetadata', renderQualityChip);
 
     player.onended = playNext;
     player.onplay = () => {
       audio.init();
-      audio.resume().catch(error => notice(error.message, true));
+      audio.resume().catch(error => showError(error.message));
       setMediaSessionPlaybackState('playing');
+      if (!sourcePending) setPlayStatus('播放中');
       applyMode();
     };
     player.onpause = () => {
       setMediaSessionPlaybackState('paused');
+      if (!sourcePending && player.hasAttribute('src')) setPlayStatus('已暫停');
       spectrum.stop();
     };
     player.onerror = () => {
       if (!sourcePending && player.hasAttribute('src')) {
-        notice('串流中斷或格式不相容，請點選歌曲重試', true);
+        setPlayStatus('串流中斷');
+        showError('串流中斷或格式不相容，請點選歌曲重試');
       }
     };
 
     doc.addEventListener('visibilitychange', applyMode);
     doc.addEventListener('keydown', event => {
-      if (event.target?.closest?.('input,textarea,select,button,dialog,[contenteditable="true"]')) return;
+      if (event.target?.closest?.('input,textarea,select,button,summary,dialog,[contenteditable="true"]')) return;
       if (event.code === 'Space' && player.hasAttribute('src')) {
         event.preventDefault();
-        if (player.paused) player.play().catch(error => notice(error.message, true));
+        if (player.paused) player.play().catch(error => showError(error.message));
         else player.pause();
       } else if (event.ctrlKey && event.code === 'KeyN') {
         event.preventDefault();
@@ -759,7 +965,7 @@ export function createApp({ doc = globalThis.document, storage = globalThis.loca
 
     $('export-playlist-btn').onclick = () => {
       if (!playlist.length) {
-        notice('清單沒有歌曲可匯出');
+        showToast('清單沒有歌曲可匯出');
         return;
       }
       const url = URL.createObjectURL(new Blob([JSON.stringify(playlist, null, 2)], { type: 'application/json' }));
@@ -778,7 +984,7 @@ export function createApp({ doc = globalThis.document, storage = globalThis.loca
         const file = input.files[0];
         if (!file) return;
         if (file.size > MAX_IMPORT_BYTES) {
-          notice('清單檔案上限為 2MB', true);
+          showError('清單檔案上限為 2MB');
           return;
         }
         try {
@@ -791,16 +997,16 @@ export function createApp({ doc = globalThis.document, storage = globalThis.loca
           if (!valid.length) throw new Error('沒有有效歌曲，或清單已滿');
           playlist.push(...valid);
           renderPlaylist();
-          notice(`匯入 ${valid.length} 首；略過 ${data.length - valid.length} 筆無效或超額項目`);
+          showToast(`匯入 ${valid.length} 首；略過 ${data.length - valid.length} 筆無效或超額項目`);
         } catch (error) {
-          notice(`匯入失敗：${error.message}`, true);
+          showError(`匯入失敗：${error.message}`);
         }
       };
       input.click();
     };
 
     bindMediaSessionHandlers({
-      onPlay: () => player.play().catch(error => notice(error.message, true)),
+      onPlay: () => player.play().catch(error => showError(error.message)),
       onPause: () => player.pause(),
       onNext: playNext,
       onSeekBy: seekBy,
@@ -819,23 +1025,27 @@ export function createApp({ doc = globalThis.document, storage = globalThis.loca
     } catch {
       /* recover corrupt storage */
     }
+    restorePanels();
     renderPlaylist();
+    renderVolume();
     if (!hasBackend()) {
-      notice('請執行 python main.py 啟動本機歡唱程式');
+      showError('請執行 python main.py 啟動本機歡唱程式');
       return;
     }
     try {
       const info = await rpc('get_quality_info');
       aiAvailable = info.ai.available;
-      $('quality-status').textContent = info.max_quality;
-      $('ai-status').textContent = info.ai.message;
+      setAIStatus(info.ai.message);
+      aiChecked = true;
+      renderAISummary('idle');
       $('prepare-ai-btn').disabled = currentIndex < 0 || !aiAvailable;
       const qualitySelect = $('quality-select');
-      if (qualitySelect && info.has_ffmpeg === false) {
-        qualitySelect.disabled = true;
+      if (qualitySelect) {
+        if (info.max_quality) qualitySelect.setAttribute('title', `支援畫質：${info.max_quality}`);
+        if (info.has_ffmpeg === false) qualitySelect.disabled = true;
       }
     } catch (error) {
-      notice(`後端連線失敗：${error.message || error}`, true);
+      showError(`後端連線失敗：${error.message || error}`);
     }
   }
 
@@ -853,6 +1063,7 @@ export function createApp({ doc = globalThis.document, storage = globalThis.loca
     playNext,
     stopPlayback,
     changeMode,
+    setMode,
     switchAI,
     handleSearch,
     clearPlaylist,

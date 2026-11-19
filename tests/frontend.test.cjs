@@ -270,7 +270,7 @@ async function run() {
   app.playNext();
   assert.equal(app.getState().currentIndex, -1);
   assert.equal(nodes.get('player').src, '');
-  assert.equal(nodes.get('app-status').textContent, '清單已播放完畢');
+  assert.equal(nodes.get('play-status').textContent, '清單已播放完畢');
 
   // 7. Native <dialog> clear playlist flow (including Esc after prior confirm)
   app.setState({ playlist: [sanitize({ id: 'dQw4w9WgXcQ', title: 'One' })], currentIndex: 0 });
@@ -375,7 +375,76 @@ async function run() {
   assert.equal(nodes.get('clear-ai-cache-btn').hidden, true);
   assert.equal(nodes.get('use-ai').disabled, true);
 
-  // 10. Media Session handlers bound
+  // 10. UI redesign: segmented mode buttons are idempotent and expose aria-pressed
+  app.setState({ usingAI: false, aiMedia: null, singing: false });
+  await app.setMode(true);
+  assert.equal(app.getState().singing, true);
+  assert.equal(nodes.get('mode-singing').getAttribute('aria-pressed'), 'true');
+  assert.equal(nodes.get('mode-guide').getAttribute('aria-pressed'), 'false');
+  assert.equal(nodes.get('quick-mix').hidden, false);
+  await nodes.get('mode-singing').onclick(); // clicking the active mode must not toggle back
+  assert.equal(app.getState().singing, true);
+  await nodes.get('mode-guide').onclick();
+  assert.equal(app.getState().singing, false);
+  assert.equal(nodes.get('quick-mix').hidden, true);
+  assert.equal(nodes.get('eq-panel').hidden, true);
+
+  // Spectrum only runs while the EQ <details> is expanded
+  let spectrumStarts = 0;
+  const realStart = spectrum.start;
+  spectrum.start = () => {
+    spectrumStarts += 1;
+  };
+  nodes.get('player').paused = false;
+  nodes.get('eq-panel').open = false;
+  await app.setMode(true);
+  assert.equal(spectrumStarts, 0);
+  nodes.get('eq-panel').open = true;
+  nodes.get('eq-panel').dispatch('toggle');
+  assert.equal(spectrumStarts, 1);
+  assert.equal(JSON.parse(storage.getItem('shen-panels-v1')).eq, true);
+  spectrum.start = realStart;
+  await app.setMode(false);
+
+  // AI <summary> shows compact progress
+  app.renderAIProgress({ state: 'separating', progress: 57.4 });
+  assert.equal(nodes.get('ai-summary').textContent, 'AI 人聲分離 57%');
+  app.renderAIProgress({ state: 'ready', progress: 100 });
+  assert.equal(nodes.get('ai-summary').textContent, '已就緒');
+  assert.equal(nodes.get('ai-summary').classList.contains('ready'), true);
+
+  // Playlist rows: track number + now-playing badge without breaking the row structure
+  app.setState({
+    playlist: [sanitize({ id: 'dQw4w9WgXcQ', title: 'One' }), sanitize({ id: 'abcdefghijk', title: 'Two' })],
+    currentIndex: 1,
+  });
+  app.renderPlaylist();
+  const secondBtn = nodes.get('playlist-items').children[1].children[0];
+  assert.equal(secondBtn.children[0].tagName, 'IMG');
+  assert.equal(secondBtn.children[1].children[0].textContent, 'Two');
+  assert.equal(secondBtn.children[1].children[1].className, 'now-badge');
+  assert.equal(secondBtn.children[2].textContent, '02');
+  assert.equal(nodes.get('playlist-items').children[1].classList.contains('active'), true);
+
+  // Actual playback quality label
+  const { videoQualityLabel } = await import(pathToFileURL(path.join(__dirname, '../web/js/main.js')).href);
+  assert.equal(videoQualityLabel(2560, 1440), '2K');
+  assert.equal(videoQualityLabel(1920, 1080), '1080p');
+  assert.equal(videoQualityLabel(1920, 800), '1080p'); // ultra-wide
+  assert.equal(videoQualityLabel(1280, 720), '720p');
+  assert.equal(videoQualityLabel(640, 360), '360p');
+  assert.equal(videoQualityLabel(0, 0), '');
+
+  // Errors persist in the alert banner; success messages go to the toast
+  app.clearPlaylist();
+  assert.equal(nodes.get('toast').textContent, '已清空待播清單');
+  app.addSong({ id: 'bad', title: 'x' });
+  assert.equal(nodes.get('app-error-wrap').hidden, false);
+  assert.match(nodes.get('app-error').textContent, /清單上限/);
+  nodes.get('app-error-close').onclick();
+  assert.equal(nodes.get('app-error-wrap').hidden, true);
+
+  // 11. Media Session handlers bound
   assert.equal(typeof mediaActions.play, 'function');
   assert.equal(typeof mediaActions.nexttrack, 'function');
 
