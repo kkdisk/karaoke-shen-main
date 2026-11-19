@@ -9,7 +9,14 @@ from unittest.mock import Mock, patch
 
 import bottle
 import main
-from separation import SeparationService, WorkerProgress, youtube_id, valid_video_id
+from separation import (
+    SeparationService,
+    WorkerProgress,
+    ai_format_selector,
+    normalize_quality,
+    valid_video_id,
+    youtube_id,
+)
 
 VIDEO = 'dQw4w9WgXcQ'
 
@@ -112,6 +119,24 @@ class BackendTests(unittest.TestCase):
         self.assertEqual(audio['url'], 'audio')
         self.assertEqual(main._find_best_dash_streams(formats[:2]), (None, None))
 
+    def test_quality_selection_720_1080_and_2k(self):
+        self.assertEqual(normalize_quality(None), 1080)
+        self.assertEqual(normalize_quality('720'), 720)
+        self.assertEqual(normalize_quality(1440), 1440)
+        with self.assertRaises(ValueError):
+            normalize_quality(2160)
+        formats = [dict(vcodec='avc1.64001f', acodec='none', ext='mp4', height=720, url='720p'),
+                   dict(vcodec='avc1.640028', acodec='none', ext='mp4', height=1080, url='1080p'),
+                   dict(vcodec='vp09.00.50.08', acodec='none', ext='webm', height=1440, url='1440p-vp9'),
+                   dict(vcodec='none', acodec='mp4a', abr=128, url='audio')]
+        self.assertEqual(main._find_best_dash_streams(formats, max_height=720)[0]['url'], '720p')
+        self.assertEqual(main._find_best_dash_streams(formats, max_height=1080)[0]['url'], '1080p')
+        self.assertEqual(main._find_best_dash_streams(formats, max_height=1440)[0]['url'], '1440p-vp9')
+        self.assertIn('height<=720', ai_format_selector(720))
+        self.assertIn('height<=1440', ai_format_selector(1440))
+        self.assertIn('vp0?9', ai_format_selector(1440))
+        self.assertTrue(call_route('/proxy_stream', f'v={VIDEO}&q=9999')['status'].startswith('400'))
+
     def test_upstream_closed_on_disconnect(self):
         upstream = Mock()
         upstream.iter_content.return_value = iter([b'first', b'second'])
@@ -173,6 +198,26 @@ class BackendTests(unittest.TestCase):
             self.assertEqual(service.status(VIDEO)['state'], 'ready')
             self.assertEqual(service.start(VIDEO)['state'], 'ready')
 
+    def probe(self, stdout, returncode=0, preference='auto'):
+        with tempfile.TemporaryDirectory() as root:
+            service = SeparationService(root)
+            service.ffmpeg, service.python = 'ffmpeg', 'python'
+            result = Mock(returncode=returncode, stdout=stdout)
+            with patch('separation.subprocess.run', return_value=result), \
+                    patch('separation.DEVICE_PREFERENCE', preference):
+                return service, service.capabilities()
+
+    def test_ai_capability_detects_cuda(self):
+        service, info = self.probe('cuda\tNVIDIA GeForce RTX 4070\n')
+        self.assertEqual((info['device'], info['gpu']), ('cuda', 'NVIDIA GeForce RTX 4070'))
+        self.assertIn('GPU', info['message'])
+
+    def test_ai_capability_uses_cpu_without_cuda_or_when_forced(self):
+        self.assertEqual(self.probe('cpu\n')[1]['device'], 'cpu')
+        self.assertEqual(self.probe('cuda\tGPU\n', preference='cpu')[1]['device'], 'cpu')
+        info = self.probe('', returncode=1)[1]
+        self.assertEqual((info['available'], info['device']), (False, 'cpu'))
+
     def test_ai_deduplicates_active_jobs(self):
         with tempfile.TemporaryDirectory() as root:
             service = SeparationService(root)
@@ -199,6 +244,22 @@ class BackendTests(unittest.TestCase):
             service = SeparationService(root)
             service._set(VIDEO, 'ready', 'ready')
             self.assertEqual(service.status(VIDEO)['state'], 'idle')
+
+    def test_clear_cache_removes_song_folder_and_respects_active_job(self):
+        with tempfile.TemporaryDirectory() as root:
+            service = SeparationService(root)
+            folder = Path(root) / VIDEO
+            folder.mkdir()
+            (folder / 'ready.json').write_text(json.dumps({'model': 'htdemucs', 'quality': 720}))
+            (folder / 'original.mp4').write_bytes(b'original')
+            (folder / 'karaoke.mp4').write_bytes(b'karaoke')
+            self.assertEqual(service.status(VIDEO)['state'], 'ready')
+            result = service.clear_cache(VIDEO)
+            self.assertEqual(result['state'], 'idle')
+            self.assertFalse(folder.exists())
+            self.assertEqual(service.status(VIDEO)['state'], 'idle')
+            service._set(VIDEO, 'separating', 'working')
+            self.assertEqual(service.clear_cache(VIDEO)['state'], 'busy')
 
     def test_cached_media_range_and_path_validation(self):
         with tempfile.TemporaryDirectory() as root:

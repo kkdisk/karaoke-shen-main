@@ -31,6 +31,15 @@ class SecurityTests(unittest.TestCase):
         self.assertEqual(app({'HTTP_HOST': 'localhost:8000', 'HTTP_ORIGIN': 'http://localhost:8000'}, start), [b'ok'])
         self.assertEqual(result['Referrer-Policy'], 'no-referrer')
         self.assertEqual(result['X-Frame-Options'], 'DENY')
+        self.assertEqual(result['Cache-Control'], 'no-store')
+        self.assertIn("default-src 'self'", result['Content-Security-Policy'])
+        self.assertIn("frame-ancestors 'none'", result['Content-Security-Policy'])
+        self.assertIn("ws://localhost:8000", result['Content-Security-Policy'])
+
+        media_headers = {}
+        app({'HTTP_HOST': 'localhost:8000', 'PATH_INFO': '/accompaniment/dQw4w9WgXcQ/karaoke'},
+            lambda status, headers, exc_info=None: media_headers.update(dict(headers)))
+        self.assertEqual(media_headers['Cache-Control'], 'private, no-cache')
 
     def test_rpc_errors_do_not_disclose_diagnostics(self):
         @safe_rpc

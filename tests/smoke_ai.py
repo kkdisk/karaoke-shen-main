@@ -31,8 +31,9 @@ with wave.open(str(folder / 'input.wav'), 'wb') as wav:
         frames.extend(struct.pack('<hh', int(left * 32767), int(right * 32767)))
     wav.writeframes(frames)
 separation_reports = []
+device = service.capabilities()['device']
 service._run([service.python, str(Path(__file__).resolve().parents[1] / 'ai_worker.py'), '-n', MODEL, '--two-stems=vocals',
-              '--device', 'cpu', '--shifts', '1', '-o', str(folder / 'stems'),
+              '--device', device, '--shifts', '1', '-o', str(folder / 'stems'),
               str(folder / 'input.wav')], folder, 600,
              progress=WorkerProgress(lambda percent, detail: separation_reports.append((percent, detail)),
                                      models=4 if MODEL == 'htdemucs_ft' else 1))
@@ -52,6 +53,6 @@ assert mux_reports, 'No real FFmpeg progress received'
 with wave.open(str(stem), 'rb') as wav:
     assert wav.getnchannels() == 2
     assert abs(wav.getnframes() / wav.getframerate() - 3) < 0.1
-print(json.dumps({'result': 'OK', 'model': MODEL, 'stereo': True,
+print(json.dumps({'result': 'OK', 'model': MODEL, 'device': device, 'stereo': True,
                   'separation_progress_reports': len(separation_reports), 'mux_progress_reports': len(mux_reports),
                   'karaoke_bytes': (folder / 'karaoke.mp4').stat().st_size}))

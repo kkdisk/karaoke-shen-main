@@ -13,6 +13,18 @@ class LocalOnlyMiddleware:
         self.application = application
         self.hosts = {f'localhost:{port}', f'127.0.0.1:{port}', f'[::1]:{port}'}
         self.origins = {f'http://{host}' for host in self.hosts}
+        ws_origins = ' '.join(f'ws://{host}' for host in sorted(self.hosts))
+        self.csp = (
+            "default-src 'self'; "
+            "script-src 'self'; "
+            "style-src 'self'; "
+            "img-src 'self' https://*.ytimg.com; "
+            "media-src 'self'; "
+            f"connect-src 'self' {ws_origins}; "
+            "object-src 'none'; "
+            "base-uri 'none'; "
+            "frame-ancestors 'none'"
+        )
 
     def allowed(self, environ):
         host = environ.get('HTTP_HOST', '').lower()
@@ -26,9 +38,13 @@ class LocalOnlyMiddleware:
                                              ('Cache-Control', 'no-store')])
             return [b'Only local application requests are allowed']
 
+        path = environ.get('PATH_INFO', '')
+        cache_control = 'private, no-cache' if path.startswith('/accompaniment/') else 'no-store'
+
         def secure_start(status, headers, exc_info=None):
             headers += [('X-Content-Type-Options', 'nosniff'), ('Referrer-Policy', 'no-referrer'),
-                        ('X-Frame-Options', 'DENY'), ('Cache-Control', 'no-store')]
+                        ('X-Frame-Options', 'DENY'), ('Content-Security-Policy', self.csp),
+                        ('Cache-Control', cache_control)]
             return start_response(status, headers, exc_info)
         return self.application(environ, secure_start)
 

@@ -1,5 +1,5 @@
-# Separate Python 3.10/3.11 environment; never install into the desktop env.
-numpy==1.26.4
+# Separate standard CPython 3.14 environment; never install into the desktop env.
+numpy==2.3.3
 torch==2.10.0
 torchaudio==2.10.0
 demucs==4.0.1

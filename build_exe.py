@@ -42,7 +42,10 @@ def build():
         runtime_dir = os.path.join(base_dir, '.tools')
         if os.path.isdir(runtime_dir):
             import shutil
-            shutil.copytree(runtime_dir, os.path.join(base_dir, 'dist', '.tools'), dirs_exist_ok=True)
+            # Only ship the media runtime, not local Python installs or pip caches.
+            shutil.copytree(runtime_dir, os.path.join(base_dir, 'dist', '.tools'),
+                            dirs_exist_ok=True,
+                            ignore=shutil.ignore_patterns('python', 'pip-cache', 'uv-cache'))
         print("\n--- 打包完成！ ---")
         print("您可以在 'dist' 資料夾中找到 'karaoke-shen.exe'")
     except subprocess.CalledProcessError as e:

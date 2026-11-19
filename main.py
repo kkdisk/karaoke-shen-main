@@ -1,5 +1,6 @@
 """Local YouTube karaoke app with optional AI accompaniment."""
 import logging
+import mimetypes
 import os
 import re
 import subprocess
@@ -13,7 +14,14 @@ import requests
 import yt_dlp
 from gevent import get_hub
 from bottle import HTTPError, request, response, static_file
-from separation import SeparationService, valid_video_id, youtube_id
+from separation import (
+    ALLOWED_QUALITIES,
+    DEFAULT_QUALITY,
+    SeparationService,
+    normalize_quality,
+    valid_video_id,
+    youtube_id,
+)
 from media_tools import ffmpeg_path, youtube_runtime_options
 from security import LocalOnlyMiddleware, LocalWebSocketServer, RedactingFormatter, safe_rpc
 
@@ -23,7 +31,7 @@ SEARCH_OPTS = {'quiet': True, 'extract_flat': True, 'socket_timeout': 15, 'nopla
                'logger': logging.getLogger('karaoke'), 'source_address': '0.0.0.0'}
 SEARCH_OPTS.update(youtube_runtime_options())
 STREAM_OPTS = {
-    'format': ('bestvideo[ext=mp4][vcodec^=avc1][height<=1080]+bestaudio/best'
+    'format': ('bestvideo[height<=1440]+bestaudio/best'
                if HAS_FFMPEG else 'best[ext=mp4][vcodec!=none][acodec!=none]'),
     'quiet': True, 'noplaylist': True, 'socket_timeout': 20,
     'ffmpeg_location': FFMPEG,
@@ -72,23 +80,26 @@ def _extract_search(url):
 
 @eel.expose
 @safe_rpc
-def get_stream_url(video_id):
+def get_stream_url(video_id, max_height=DEFAULT_QUALITY):
     if not valid_video_id(video_id):
         raise ValueError('無效的影片 ID')
-    return f'/proxy_stream?v={video_id}'
+    quality = normalize_quality(max_height)
+    return f'/proxy_stream?v={video_id}&q={quality}'
 
 
 @eel.expose
 @safe_rpc
 def get_quality_info():
     return {'has_ffmpeg': HAS_FFMPEG, 'ai': get_hub().threadpool.apply(ai_service.capabilities),
-            'max_quality': '最高 1080p' if HAS_FFMPEG else '來源提供的合併 MP4'}
+            'max_quality': '最高 2K (1440p)' if HAS_FFMPEG else '來源提供的合併 MP4',
+            'qualities': list(ALLOWED_QUALITIES) if HAS_FFMPEG else []}
 
 
 @eel.expose
 @safe_rpc
-def prepare_accompaniment(video_id):
-    return get_hub().threadpool.apply(ai_service.start, (video_id,))
+def prepare_accompaniment(video_id, max_height=DEFAULT_QUALITY):
+    quality = normalize_quality(max_height)
+    return get_hub().threadpool.apply(ai_service.start, (video_id, quality))
 
 
 @eel.expose
@@ -103,17 +114,44 @@ def cancel_accompaniment(video_id):
     return ai_service.cancel(video_id)
 
 
-def _find_best_dash_streams(formats):
-    videos = [f for f in formats if str(f.get('vcodec', '')).startswith(('avc1', 'h264'))
-              and f.get('acodec') in (None, 'none') and f.get('ext') == 'mp4'
-              and f.get('protocol') in (None, 'https', 'http') and f.get('url')
-              and 0 < (f.get('height') or 0) <= 1080 and not f.get('has_drm')]
+@eel.expose
+@safe_rpc
+def clear_accompaniment_cache(video_id):
+    # Renaming/deleting up to ~2GB of media must not block the gevent hub (streams, RPC).
+    return get_hub().threadpool.apply(ai_service.clear_cache, (video_id,))
+
+
+def _codec_rank(vcodec):
+    codec = str(vcodec or '').lower()
+    if codec.startswith(('avc1', 'h264')):
+        return 3
+    if codec.startswith(('vp09', 'vp9')):
+        return 2
+    if codec.startswith('av01'):
+        return 1
+    return 0
+
+
+def _find_best_dash_streams(formats, max_height=DEFAULT_QUALITY):
+    max_height = normalize_quality(max_height)
+    allow_high_codecs = max_height > 1080
+    videos = []
+    for f in formats:
+        if (f.get('acodec') not in (None, 'none') or not f.get('url')
+                or f.get('protocol') not in (None, 'https', 'http')
+                or not (0 < (f.get('height') or 0) <= max_height) or f.get('has_drm')):
+            continue
+        vcodec = str(f.get('vcodec', '')).lower()
+        is_h264_mp4 = vcodec.startswith(('avc1', 'h264')) and f.get('ext') == 'mp4'
+        is_2k_codec = allow_high_codecs and vcodec.startswith(('vp09', 'vp9', 'av01'))
+        if is_h264_mp4 or is_2k_codec:
+            videos.append(f)
     audios = [f for f in formats if f.get('acodec') not in (None, 'none')
               and f.get('vcodec') in (None, 'none') and f.get('url')
               and f.get('protocol') in (None, 'https', 'http') and not f.get('has_drm')]
     if not videos or not audios:
         return None, None
-    return (max(videos, key=lambda f: (f.get('height') or 0, f.get('tbr') or 0)),
+    return (max(videos, key=lambda f: (f.get('height') or 0, _codec_rank(f.get('vcodec')), f.get('tbr') or 0)),
             max(audios, key=lambda f: f.get('abr') or f.get('tbr') or 0))
 
 
@@ -188,6 +226,10 @@ def proxy_stream():
     if not valid_video_id(video_id):
         return HTTPError(400, 'Invalid video id')
     try:
+        max_height = normalize_quality(request.query.get('q'))
+    except ValueError:
+        return HTTPError(400, 'Invalid quality')
+    try:
         info = get_hub().threadpool.apply(_stream_info, (video_id,))
         formats = info.get('formats') or []
         merged = [f for f in formats if f.get('ext') == 'mp4'
@@ -195,7 +237,7 @@ def proxy_stream():
                   and f.get('acodec') not in (None, 'none') and f.get('url')
                   and f.get('protocol') in (None, 'http', 'https') and not f.get('has_drm')]
         best = max(merged, key=lambda f: f.get('height') or 0, default=None)
-        video, audio = _find_best_dash_streams(formats) if HAS_FFMPEG else (None, None)
+        video, audio = _find_best_dash_streams(formats, max_height=max_height) if HAS_FFMPEG else (None, None)
         response.content_type = 'video/mp4'
         if video and audio and (video.get('height') or 0) > ((best or {}).get('height') or 0):
             response.set_header('Accept-Ranges', 'none')
@@ -239,6 +281,7 @@ def main(browser_mode='chrome', port=8000):
                         format='%(asctime)s %(levelname)s %(message)s')
     for handler in logging.getLogger().handlers:
         handler.setFormatter(RedactingFormatter('%(asctime)s %(levelname)s %(message)s'))
+    mimetypes.add_type('text/javascript', '.js')
     eel.init(str(Path(__file__).resolve().parent / 'web'))
     application = eel.btl.default_app()
     # Eel selects this adapter internally; the replacement checks before the

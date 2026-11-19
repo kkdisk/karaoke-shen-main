@@ -1,6 +1,8 @@
 eel
+gevent>=25.9.1
+greenlet>=3.3.0
 yt-dlp[default]
 requests
 bottle
 imageio-ffmpeg==0.6.0
-pyinstaller
+pyinstaller>=6.16.0

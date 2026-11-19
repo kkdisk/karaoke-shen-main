@@ -56,8 +56,13 @@ def main():
         # Official checkpoints contain the model class as well as tensor weights.
         # Allow the architecture and its numeric sample-rate metadata only;
         # never fall back to unrestricted pickle loading.
+        # NumPy 2 moved scalar to numpy._core; fall back to numpy.core on NumPy 1.x.
+        # Older official checkpoints still reference numpy.core, so allow that exact legacy name as well.
+        core = getattr(np, '_core', None) or np.core
+        scalar = core.multiarray.scalar
         with torch.serialization.safe_globals([HTDemucs, Fraction, np.dtype,
-                                              np.core.multiarray.scalar, type(np.dtype('float64'))]):
+                                              scalar, (scalar, 'numpy.core.multiarray.scalar'),
+                                              type(np.dtype('float64'))]):
             package = torch.load(path, map_location='cpu', weights_only=True)
         return load_model(package)
 

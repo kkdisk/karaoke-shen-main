@@ -19,7 +19,57 @@ MODEL = os.environ.get('KARAOKE_AI_MODEL', 'htdemucs')
 if MODEL not in ('htdemucs', 'htdemucs_ft'):
     MODEL = 'htdemucs'
 MAX_DURATION = 900
+ALLOWED_QUALITIES = (720, 1080, 1440)
+DEFAULT_QUALITY = 1080
+try:
+    CACHE_LIMIT_GB = max(2, int(os.environ.get('KARAOKE_CACHE_MAX_GB', '6')))
+except ValueError:
+    CACHE_LIMIT_GB = 6
+# Worst case for one 2K job: original (<=1GB) + karaoke.mp4 copy + WAV and stems.
+MIN_FREE_GB = 3
 ACTIVE_STATES = ('downloading', 'preparing', 'separating', 'muxing', 'cancelling')
+# auto: use CUDA when the AI environment can actually run a CUDA kernel; cpu: force CPU.
+DEVICE_PREFERENCE = os.environ.get('KARAOKE_AI_DEVICE', 'auto').strip().lower()
+if DEVICE_PREFERENCE not in ('auto', 'cpu'):
+    DEVICE_PREFERENCE = 'auto'
+# Runs inside the AI Python. The last stdout line is "cpu" or "cuda\t<GPU name>".
+CAPABILITY_PROBE = '''
+import demucs, torch, torchaudio, soundfile
+assert tuple(map(int, torch.__version__.split("+")[0].split(".")[:2])) >= (2, 10)
+device = "cpu"
+try:
+    if torch.cuda.is_available():
+        torch.ones(1, device="cuda").add_(1).item()
+        device = "cuda\\t" + torch.cuda.get_device_name(0)
+except Exception:
+    device = "cpu"
+print(device)
+'''
+
+
+def normalize_quality(value, default=DEFAULT_QUALITY):
+    if value is None or value == '':
+        return default
+    try:
+        height = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError('畫質僅支援 720p、1080p 或 2K (1440p)') from exc
+    if height not in ALLOWED_QUALITIES:
+        raise ValueError('畫質僅支援 720p、1080p 或 2K (1440p)')
+    return height
+
+
+def ai_format_selector(max_height):
+    height = normalize_quality(max_height)
+    if height > 1080:
+        return (
+            f'bestvideo[vcodec~="^(avc1|h264|vp0?9|av01)"][height<={height}]+bestaudio[ext=m4a]/'
+            f'bestvideo[height<={height}]+bestaudio/best[ext=mp4]'
+        )
+    return (
+        f'bestvideo[ext=mp4][vcodec^=avc1][height<={height}]+bestaudio[ext=m4a]/'
+        f'bestvideo[height<={height}]+bestaudio/best[ext=mp4]'
+    )
 
 
 class WorkerProgress:
@@ -109,41 +159,64 @@ class SeparationService:
         if self._capability is not None:
             return dict(self._capability)
         ready = False
+        device, gpu = 'cpu', ''
         message = '需安裝 FFmpeg 與 AI 環境，詳見 README.md'
         if self.ffmpeg and self.python:
             try:
-                result = subprocess.run([self.python, '-c',
-                                        'import demucs, torch, torchaudio, soundfile; '
-                                        'assert tuple(map(int, torch.__version__.split("+")[0].split(".")[:2])) >= (2, 10)'],
-                                        capture_output=True, timeout=30,
+                result = subprocess.run([self.python, '-c', CAPABILITY_PROBE],
+                                        capture_output=True, timeout=60, text=True, errors='replace',
                                         creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
                 ready = result.returncode == 0
+                lines = (result.stdout or '').strip().splitlines()
+                if ready and lines and lines[-1].startswith('cuda') and DEVICE_PREFERENCE == 'auto':
+                    device, _, gpu = lines[-1].partition('\t')
             except (OSError, subprocess.TimeoutExpired):
                 pass
-        self._capability = {'available': ready, 'model': MODEL,
-                            'message': 'AI 就緒；首次使用會下載模型，CPU 處理可能需要數分鐘' if ready else message}
+        self._capability = {'available': ready, 'model': MODEL, 'device': device, 'gpu': gpu.strip()}
+        self._capability['message'] = self._ready_message() if ready else message
         return dict(self._capability)
 
-    def _ready(self, video_id):
+    def _ready_message(self):
+        if self._capability.get('device') == 'cuda':
+            name = self._capability.get('gpu') or 'NVIDIA GPU'
+            return f'AI 就緒（GPU 加速：{name}）；首次使用會下載模型'
+        return 'AI 就緒（CPU）；首次使用會下載模型，CPU 處理可能需要數分鐘'
+
+
+    def _ready_manifest(self, video_id):
         folder = self.root / video_id
         try:
             manifest = json.loads((folder / 'ready.json').read_text())
-            return isinstance(manifest, dict) and manifest.get('model') == MODEL and all(
+            if isinstance(manifest, dict) and manifest.get('model') == MODEL and all(
                 (folder / name).is_file() and (folder / name).stat().st_size > 0
-                for name in ('original.mp4', 'karaoke.mp4'))
+                for name in ('original.mp4', 'karaoke.mp4')
+            ):
+                return manifest
         except (OSError, ValueError):
-            return False
+            pass
+        return None
+
+    def _ready(self, video_id):
+        return self._ready_manifest(video_id) is not None
 
     def status(self, video_id):
         if not valid_video_id(video_id):
             raise ValueError('無效的影片 ID')
         with self.lock:
-            if self._ready(video_id):
+            manifest = self._ready_manifest(video_id)
+            if manifest is not None:
                 job = self.jobs.get(video_id, {})
-                return {'state': 'ready', 'message': 'AI 伴奏已完成，可保留立體聲伴奏播放',
+                quality = manifest.get('quality')
+                q_label = '2K' if quality == 1440 else f'{quality}p' if quality else ''
+                msg = f'AI 伴奏已完成（{q_label}），可保留立體聲伴奏播放' if q_label else 'AI 伴奏已完成，可保留立體聲伴奏播放'
+                try:
+                    version = (self.root / video_id / 'ready.json').stat().st_mtime_ns
+                except OSError:
+                    version = 0
+                return {'state': 'ready', 'message': msg, 'quality': quality,
                         'progress': 100, 'elapsed_seconds': self._elapsed(job),
-                        'original': f'/accompaniment/{video_id}/original',
-                        'karaoke': f'/accompaniment/{video_id}/karaoke'}
+                        'original': f'/accompaniment/{video_id}/original?v={version}',
+                        'karaoke': f'/accompaniment/{video_id}/karaoke?v={version}'}
             job = self.jobs.get(video_id, {'state': 'idle', 'message': '尚未製作 AI 伴奏'})
             if job['state'] == 'ready':
                 return {'state': 'idle', 'message': '伴奏快取已移除或損壞，請重新製作'}
@@ -157,7 +230,8 @@ class SeparationService:
             return None
         return round(max(0, job.get('ended_at', time.monotonic()) - started))
 
-    def start(self, video_id):
+    def start(self, video_id, max_height=DEFAULT_QUALITY):
+        max_height = normalize_quality(max_height)
         current = self.status(video_id)
         if current['state'] == 'ready':
             return current
@@ -169,10 +243,11 @@ class SeparationService:
             self.cancel_event.clear()
             if len(self.jobs) > 100:
                 self.jobs.clear()
-            self.jobs[video_id] = {'state': 'downloading', 'message': '正在下載音樂影片…',
+            q_label = '2K (1440p)' if max_height == 1440 else f'{max_height}p'
+            self.jobs[video_id] = {'state': 'downloading', 'message': f'正在下載音樂影片（上限 {q_label}）…',
                                    'started_at': time.monotonic(), 'progress': None,
                                    'detail': '正在解析來源與取得下載資訊'}
-        threading.Thread(target=self._worker, args=(video_id,), daemon=True).start()
+        threading.Thread(target=self._worker, args=(video_id, max_height), daemon=True).start()
         return self.status(video_id)
 
     def _set(self, video_id, state, message):
@@ -199,6 +274,37 @@ class SeparationService:
                 self.cancel_event.set()
                 self.jobs[video_id].update(state='cancelling', message='正在取消製作…', detail='', progress=None)
         return self.status(video_id)
+
+    def clear_cache(self, video_id):
+        if not valid_video_id(video_id):
+            raise ValueError('無效的影片 ID')
+        with self.lock:
+            if self.jobs.get(video_id, {}).get('state') in ACTIVE_STATES:
+                return {'state': 'busy', 'message': '此歌曲正在處理中，請先取消製作'}
+            folder = self.root / video_id
+            if folder.parent.resolve() != self.root.resolve():
+                raise ValueError('無效的影片 ID')
+            if folder.exists():
+                trash = self.root / f'.removing-{video_id}-{time.monotonic_ns()}'
+                # Atomic rename fails on Windows while any file is still open (e.g. the stream
+                # the player just released), avoiding half-deleted cache folders. Retry briefly.
+                for attempt in range(6):
+                    try:
+                        folder.rename(trash)
+                        break
+                    except OSError:
+                        if attempt == 5:
+                            return {'state': 'error', 'message': '無法清除快取，檔案可能仍在使用中，請稍後再試'}
+                        time.sleep(0.5)
+            self.jobs.pop(video_id, None)
+        self._sweep_trash()
+        return {'state': 'idle', 'message': '已清除此首快取，可依目前畫質上限重新製作'}
+
+    def _sweep_trash(self):
+        """Delete renamed cache folders, including ones a previous delete could not finish."""
+        for trash in self.root.glob('.removing-*'):
+            shutil.rmtree(trash, onexc=lambda _func, path, exc: logging.getLogger('karaoke').warning(
+                'Could not delete cache file %s: %s', path, exc))
 
     def close(self):
         self.cancel_event.set()
@@ -253,17 +359,34 @@ class SeparationService:
                 with self.lock:
                     self.process = None
 
-    def _worker(self, video_id):
+    def _separate(self, video_id, folder, device):
+        # GPU runs take minutes; a stalled CUDA worker should fall back long before the CPU limit.
+        self._run([self.python, str(Path(__file__).resolve().parent / 'ai_worker.py'), '-n', MODEL, '--two-stems=vocals',
+                   '--device', device, '--shifts', '1', '-o', str(folder / 'stems'),
+                   str(folder / 'input.wav')], folder, 1200 if device == 'cuda' else 3600,
+                  WorkerProgress(lambda percent, detail: self._progress(video_id, 'separating', percent, detail),
+                                 models=4 if MODEL == 'htdemucs_ft' else 1))
+
+    def _worker(self, video_id, max_height=DEFAULT_QUALITY):
         folder = self.root / video_id
         failure = None
+        cache_limit_msg = f'伴奏快取已超過 {CACHE_LIMIT_GB}GB；請依 README 清理快取後再試'
+        free_space_msg = f'製作伴奏需要至少 {MIN_FREE_GB}GB 可用空間'
         try:
             self.root.mkdir(parents=True, exist_ok=True)
+            self._sweep_trash()
             used = sum(p.stat().st_size for p in self.root.rglob('*') if p.is_file())
-            if used > 2 * 1024**3:
-                raise ValueError('伴奏快取已超過 2GB；請依 README 清理快取後再試')
+            if used > CACHE_LIMIT_GB * 1024**3:
+                raise ValueError(cache_limit_msg)
             folder.mkdir(exist_ok=True)
-            if shutil.disk_usage(folder).free < 2 * 1024**3:
-                raise ValueError('製作伴奏需要至少 2GB 可用空間')
+            if shutil.disk_usage(folder).free < MIN_FREE_GB * 1024**3:
+                raise ValueError(free_space_msg)
+            # Remove any stale media left by a previously cancelled job so yt-dlp
+            # does not reuse an older file at a different quality.
+            (folder / 'ready.json').unlink(missing_ok=True)
+            (folder / 'karaoke.mp4').unlink(missing_ok=True)
+            for leftover in folder.glob('original.*'):
+                leftover.unlink(missing_ok=True)
 
             def limit(info, *, incomplete=False):
                 if info.get('is_live') or (info.get('duration') or 0) > MAX_DURATION:
@@ -292,10 +415,10 @@ class SeparationService:
                     detail += f' · 此軌預估剩餘 {round(eta)} 秒'
                 self._progress(video_id, 'downloading', percent, detail)
 
-            options = {'format': 'bestvideo[ext=mp4][vcodec^=avc1][height<=720]+bestaudio[ext=m4a]/best[ext=mp4]',
+            options = {'format': ai_format_selector(max_height),
                        'outtmpl': str(folder / 'original.%(ext)s'), 'merge_output_format': 'mp4',
                        'noplaylist': True, 'socket_timeout': 20, 'retries': 2,
-                       'max_filesize': 500 * 1024**2, 'match_filter': limit, 'quiet': True,
+                       'max_filesize': 1024 * 1024**2, 'match_filter': limit, 'quiet': True,
                        'ffmpeg_location': self.ffmpeg}
             options['source_address'] = '0.0.0.0'
             options['logger'] = logging.getLogger('karaoke')
@@ -318,13 +441,20 @@ class SeparationService:
                        '-ar', '44100', '-ac', '2', '-progress', 'pipe:1', '-nostats',
                        str(folder / 'input.wav')], folder, 300,
                       WorkerProgress(lambda percent, detail: self._progress(video_id, 'preparing', percent, detail), duration=duration))
-            self._set(video_id, 'separating', 'AI 正在分離人聲與伴奏…首次使用會下載模型')
+            device = (self._capability or {}).get('device', 'cpu')
+            self._set(video_id, 'separating', f'AI 正在分離人聲與伴奏（{"GPU" if device == "cuda" else "CPU"}）…首次使用會下載模型')
             self._progress(video_id, 'separating', None, '正在載入模型；第一個分段完成後會顯示百分比')
-            self._run([self.python, str(Path(__file__).resolve().parent / 'ai_worker.py'), '-n', MODEL, '--two-stems=vocals',
-                       '--device', 'cpu', '--shifts', '1', '-o', str(folder / 'stems'),
-                       str(folder / 'input.wav')], folder, 3600,
-                      WorkerProgress(lambda percent, detail: self._progress(video_id, 'separating', percent, detail),
-                                     models=4 if MODEL == 'htdemucs_ft' else 1))
+            try:
+                self._separate(video_id, folder, device)
+            except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
+                # Retry this job only; a transient CUDA error (e.g. out of VRAM on a long song)
+                # should not force later jobs onto the much slower CPU path.
+                if device != 'cuda' or self.cancel_event.is_set():
+                    raise
+                logging.getLogger('karaoke').warning('CUDA separation failed; retrying on CPU: %s', video_id)
+                shutil.rmtree(folder / 'stems', ignore_errors=True)
+                self._set(video_id, 'separating', 'GPU 處理失敗，改用 CPU 重新分離…')
+                self._separate(video_id, folder, 'cpu')
             stem = folder / 'stems' / MODEL / 'input' / 'no_vocals.wav'
             self._set(video_id, 'muxing', '正在合成可拖曳進度的歡唱影片…')
             self._run([self.ffmpeg, '-y', '-nostdin', '-i', str(original), '-i', str(stem),
@@ -334,13 +464,13 @@ class SeparationService:
                       WorkerProgress(lambda percent, detail: self._progress(video_id, 'muxing', percent, detail), duration=duration))
             if self.cancel_event.is_set():
                 raise RuntimeError('已取消')
-            (folder / 'ready.tmp').write_text(json.dumps({'model': MODEL}), encoding='utf-8')
+            (folder / 'ready.tmp').write_text(json.dumps({'model': MODEL, 'quality': max_height}), encoding='utf-8')
             (folder / 'ready.tmp').replace(folder / 'ready.json')
             self._set(video_id, 'ready', 'AI 伴奏已完成')
         except Exception as exc:
             logging.getLogger('karaoke').exception('AI separation failed: %s', video_id)
-            public_messages = {'伴奏快取已超過 2GB；請依 README 清理快取後再試',
-                               '製作伴奏需要至少 2GB 可用空間', 'AI 伴奏僅支援 15 分鐘以內的非直播影片',
+            public_messages = {cache_limit_msg,
+                               free_space_msg, 'AI 伴奏僅支援 15 分鐘以內的非直播影片',
                                '未能下載可用影片'}
             public_error = str(exc) if isinstance(exc, ValueError) and str(exc) in public_messages else '無法完成伴奏製作'
             failure = ('cancelled', '已取消，可稍後重新製作') if self.cancel_event.is_set() else (

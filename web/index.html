@@ -6,7 +6,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>卡拉OK神歡唱系統</title>
   <link rel="stylesheet" href="style.css">
-  <script type="text/javascript" src="/eel.js"></script>
+  <script src="/eel.js"></script>
 </head>
 
 <body>
@@ -17,47 +17,58 @@
       <span id="quality-status" class="quality-badge">本機歡唱工作室</span>
     </header>
 
-    <div class="search-container">
-      <input type="text" id="search-input" maxlength="300" aria-label="搜尋歌曲" placeholder="輸入搜尋關鍵字或 YouTube 網址...">
-      <div class="loader" id="search-loader"></div>
-      <button class="btn" id="search-btn">
+    <form id="search-form" class="search-container" role="search">
+      <label for="search-input" class="visually-hidden">搜尋歌曲或輸入 YouTube 網址</label>
+      <input type="search" id="search-input" maxlength="300" autocomplete="off" placeholder="輸入搜尋關鍵字或 YouTube 網址...">
+      <div class="loader" id="search-loader" role="progressbar" aria-label="搜尋中" hidden></div>
+      <button type="submit" class="btn" id="search-btn">
         <span aria-hidden="true">⌕</span> 搜尋
       </button>
-    </div>
+    </form>
 
     <p id="app-status" class="status-line" role="status" aria-live="polite">搜尋歌曲或匯入清單，開始歡唱</p>
-    <div class="results-section" id="results-section">
-      <h3>搜尋結果</h3>
+
+    <section class="results-section" id="results-section" aria-labelledby="results-heading" hidden>
+      <h2 id="results-heading" class="section-heading">搜尋結果</h2>
       <div class="results-grid" id="results-grid">
         <!-- Results will be injected here -->
       </div>
-    </div>
+    </section>
 
-    <div class="main-content">
-      <div class="player-section">
+    <main class="main-content">
+      <section class="player-section" aria-label="影音播放器">
         <div id="video-wrapper">
           <video id="player" controls crossorigin="anonymous" preload="auto"></video>
-          <!-- Custom error/loading overlay could go here -->
         </div>
 
         <div class="controls-row">
           <div class="song-info">
             <h2 id="now-playing-title">尚未播放歌曲</h2>
-            <button class="btn btn-small" id="skip-btn" title="下一首">
+            <button type="button" class="btn btn-small" id="skip-btn" title="下一首">
               <span aria-hidden="true">⏭</span> 切歌
             </button>
           </div>
 
           <div class="media-controls">
             <div class="volume-container">
+              <label for="volume-slider" class="visually-hidden">播放音量</label>
               <span aria-hidden="true">🔊</span>
-              <input type="range" id="volume-slider" aria-label="播放音量" min="0" max="1" step="0.01" value="1">
+              <input type="range" id="volume-slider" min="0" max="1" step="0.01" value="1" aria-valuetext="100%">
+            </div>
+
+            <div class="quality-selector">
+              <label for="quality-select">畫質上限</label>
+              <select id="quality-select" aria-label="影片畫質上限">
+                <option value="720">720p 省空間</option>
+                <option value="1080" selected>1080p 推薦</option>
+                <option value="1440">2K (1440p)</option>
+              </select>
             </div>
 
             <div class="mode-selector">
               <span class="mode-label active" id="label-guide">導唱</span>
-              <button type="button" class="knob-switch" id="karaoke-knob" aria-label="切換歡唱模式" aria-pressed="false">
-                <div class="knob-inner"></div>
+              <button type="button" role="switch" class="knob-switch" id="karaoke-knob" aria-label="切換歡唱模式" aria-checked="false">
+                <span class="knob-inner" aria-hidden="true"></span>
               </button>
               <span class="mode-label" id="label-singing">歡唱</span>
             </div>
@@ -65,57 +76,72 @@
         </div>
 
         <div class="ai-panel">
-          <div class="ai-heading"><strong>AI 伴奏工作室</strong><button class="btn btn-small" id="prepare-ai-btn" disabled>製作 AI 伴奏</button></div>
+          <div class="ai-heading">
+            <strong>AI 伴奏工作室</strong>
+            <div class="ai-actions">
+              <button type="button" class="btn btn-ghost btn-small" id="clear-ai-cache-btn" title="清除此首 AI 伴奏快取，以便用新畫質重新製作" hidden>清除快取</button>
+              <button type="button" class="btn btn-small" id="prepare-ai-btn" disabled>製作 AI 伴奏</button>
+            </div>
+          </div>
           <p id="ai-status" role="status" aria-live="polite">正在檢查 AI 環境…</p>
           <div id="ai-progress-panel" class="ai-progress-panel" hidden>
-            <div class="ai-progress-heading"><span id="ai-progress-stage">準備中</span><span id="ai-progress-percent">等待進度…</span></div>
+            <div class="ai-progress-heading">
+              <span id="ai-progress-stage">準備中</span>
+              <span id="ai-progress-percent">等待進度…</span>
+            </div>
             <progress id="ai-progress" max="100" aria-label="目前 AI 工作階段進度"></progress>
-            <div class="ai-progress-meta"><span id="ai-progress-detail"></span><span id="ai-progress-elapsed"></span></div>
+            <div class="ai-progress-meta">
+              <span id="ai-progress-detail"></span>
+              <span id="ai-progress-elapsed"></span>
+            </div>
           </div>
-          <button class="btn btn-ghost" id="cancel-ai-btn" hidden>取消製作</button>
-          <label class="ai-toggle"><input type="checkbox" id="use-ai" disabled> 使用 AI 伴奏（完成後可切換原唱／歡唱）</label>
+          <button type="button" class="btn btn-ghost" id="cancel-ai-btn" hidden>取消製作</button>
+          <label class="ai-toggle">
+            <input type="checkbox" id="use-ai" disabled> 使用 AI 伴奏（完成後可切換原唱／歡唱）
+          </label>
           <p class="mode-note" id="mode-detail">快速模式：削弱中央人聲，也可能影響中央樂器</p>
         </div>
+
         <!-- EQ & Spectrum Panel (only visible in singing mode) -->
-        <div class="eq-panel" id="eq-panel">
+        <div class="eq-panel" id="eq-panel" hidden>
           <div class="eq-header">
             <span><span aria-hidden="true">☷</span> 歡唱 EQ 調整</span>
-            <button class="btn btn-ghost btn-small" id="eq-reset-btn">重置</button>
+            <button type="button" class="btn btn-ghost btn-small" id="eq-reset-btn">重置</button>
           </div>
 
           <div class="eq-spectrum-row">
             <!-- 5-Band EQ -->
             <div class="eq-sliders">
               <div class="eq-band">
-                <input type="range" class="eq-slider" id="eq-low" aria-label="低音 EQ" min="-12" max="12" step="1" value="0"
-                  orient="vertical">
-                <label>低音<br>60Hz</label>
+                <output class="eq-value" id="eq-low-val" for="eq-low">0 dB</output>
+                <input type="range" class="eq-slider" id="eq-low" min="-12" max="12" step="1" value="0" aria-valuetext="0 dB">
+                <label for="eq-low">低音<br>60Hz</label>
               </div>
               <div class="eq-band">
-                <input type="range" class="eq-slider" id="eq-lowmid" aria-label="低中頻 EQ" min="-12" max="12" step="1" value="0"
-                  orient="vertical">
-                <label>低中<br>250Hz</label>
+                <output class="eq-value" id="eq-lowmid-val" for="eq-lowmid">0 dB</output>
+                <input type="range" class="eq-slider" id="eq-lowmid" min="-12" max="12" step="1" value="0" aria-valuetext="0 dB">
+                <label for="eq-lowmid">低中<br>250Hz</label>
               </div>
               <div class="eq-band">
-                <input type="range" class="eq-slider" id="eq-mid" aria-label="中頻 EQ" min="-12" max="12" step="1" value="0"
-                  orient="vertical">
-                <label>中頻<br>1kHz</label>
+                <output class="eq-value" id="eq-mid-val" for="eq-mid">0 dB</output>
+                <input type="range" class="eq-slider" id="eq-mid" min="-12" max="12" step="1" value="0" aria-valuetext="0 dB">
+                <label for="eq-mid">中頻<br>1kHz</label>
               </div>
               <div class="eq-band">
-                <input type="range" class="eq-slider" id="eq-himid" aria-label="高中頻 EQ" min="-12" max="12" step="1" value="0"
-                  orient="vertical">
-                <label>高中<br>4kHz</label>
+                <output class="eq-value" id="eq-himid-val" for="eq-himid">0 dB</output>
+                <input type="range" class="eq-slider" id="eq-himid" min="-12" max="12" step="1" value="0" aria-valuetext="0 dB">
+                <label for="eq-himid">高中<br>4kHz</label>
               </div>
               <div class="eq-band">
-                <input type="range" class="eq-slider" id="eq-high" aria-label="高頻 EQ" min="-12" max="12" step="1" value="0"
-                  orient="vertical">
-                <label>高音<br>12kHz</label>
+                <output class="eq-value" id="eq-high-val" for="eq-high">0 dB</output>
+                <input type="range" class="eq-slider" id="eq-high" min="-12" max="12" step="1" value="0" aria-valuetext="0 dB">
+                <label for="eq-high">高音<br>12kHz</label>
               </div>
             </div>
 
             <!-- Spectrum Analyzer -->
-            <div class="spectrum-container">
-              <canvas id="spectrum-canvas" width="400" height="120"></canvas>
+            <div class="spectrum-container" id="spectrum-container">
+              <canvas id="spectrum-canvas" width="400" height="120" aria-hidden="true"></canvas>
             </div>
           </div>
 
@@ -123,47 +149,57 @@
             <div class="vocal-strength" id="quick-controls">
               <label for="vocal-strength">中央人聲削弱</label>
               <input type="range" id="vocal-strength" min="0" max="1" step="0.05" value="0.8">
-              <span id="vocal-strength-val">80%</span>
+              <output id="vocal-strength-val" for="vocal-strength">80%</output>
             </div>
             <div>
               <label for="accompaniment-gain">伴奏增益</label>
               <input type="range" id="accompaniment-gain" min="0" max="1.5" step="0.1" value="1">
-              <span id="accompaniment-gain-val">1.0x</span>
+              <output id="accompaniment-gain-val" for="accompaniment-gain">1.0x</output>
             </div>
           </div>
         </div>
+      </section>
 
-      </div>
-
-      <div class="playlist-section">
+      <aside class="playlist-section" aria-labelledby="playlist-heading">
         <div class="playlist-header">
-          <span>待播清單 <small id="queue-count">0 首</small></span>
+          <h2 id="playlist-heading" class="playlist-title">
+            待播清單 <small id="queue-count">0 首</small>
+          </h2>
           <div class="playlist-actions">
-            <button class="btn btn-ghost btn-icon-only" id="export-playlist-btn" title="匯出清單">
+            <button type="button" class="btn btn-ghost btn-icon-only" id="export-playlist-btn" title="匯出清單">
               <span aria-hidden="true">↑</span> 匯出
             </button>
-            <button class="btn btn-ghost btn-icon-only" id="import-playlist-btn" title="匯入清單">
+            <button type="button" class="btn btn-ghost btn-icon-only" id="import-playlist-btn" title="匯入清單">
               <span aria-hidden="true">↓</span> 匯入
             </button>
-            <button class="btn btn-ghost" id="clear-playlist-btn" title="清空清單">
+            <button type="button" class="btn btn-ghost" id="clear-playlist-btn" title="清空清單">
               <span aria-hidden="true">×</span> 清空
             </button>
           </div>
         </div>
-        <div id="playlist-items">
-          <!-- Playlist items will be injected here -->
-          <p style="text-align: center; color: rgba(255,255,255,0.3); padding-top: 20px;">目前沒有待播歌曲</p>
-        </div>
-      </div>
-    </div>
-
+        <ul id="playlist-items" class="playlist-list">
+          <li class="empty-queue">搜尋歌曲，開始你的歡唱清單</li>
+        </ul>
+      </aside>
+    </main>
 
     <footer>
-      <span>Copyright © James </span>
+      <span>Copyright © James</span>
     </footer>
   </div>
 
-  <script src="script.js"></script>
+  <dialog id="confirm-clear-dialog" class="confirm-dialog" closedby="any" aria-labelledby="confirm-clear-title" aria-describedby="confirm-clear-desc">
+    <form method="dialog" class="dialog-content">
+      <h2 id="confirm-clear-title">清空待播清單？</h2>
+      <p id="confirm-clear-desc">這會停止目前播放並移除所有待播歌曲，此動作無法復原。</p>
+      <div class="dialog-actions">
+        <button type="submit" value="cancel" class="btn btn-ghost">取消</button>
+        <button type="submit" value="confirm" class="btn btn-danger">確定清空</button>
+      </div>
+    </form>
+  </dialog>
+
+  <script type="module" src="js/main.js"></script>
 </body>
 
 </html>

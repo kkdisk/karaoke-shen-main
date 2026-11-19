@@ -1,5 +1,27 @@
 # v2 驗證記錄
 
+## Python 3.14 遷移（2026-10-14）
+
+- 專案內安裝 uv 提供的標準 64-bit CPython 3.14.4；全域 Python 3.10 與 PATH 未修改。
+- `.venv` 與 `.venv-ai` 重新建立；舊環境保留為各自的 `.backup-時間` 目錄。
+- APP 使用 Eel 0.18.2、gevent 26.9.0、greenlet 3.5.6；AI 使用 NumPy 2.3.3、
+  PyTorch／torchaudio 2.10.0+cu128、Demucs 4.0.1。兩個環境的 `pip check` 通過。
+- 24 項 Python 回歸測試通過；前端測試以既有 Deno 2.9.7 的 Node 相容模式執行通過：
+  `.\.tools\deno.exe run --allow-read tests/frontend.test.cjs`。
+- 真實 Eel HTTP／WebSocket 啟動與來源防護測試通過。測試將 `LOCALAPPDATA` 指向
+  專案內 `tests/.smoke/local-appdata`，避免寫入 sandbox 外的使用者日誌目錄。
+- `htdemucs` 實際 CPU 分離與 FFmpeg 合成 3 秒雙聲道音訊通過；
+  RTX 2060 的 CUDA 分離另行通過，CUDA 可用狀態為 True。
+  NumPy 2 下官方 checkpoint 的 checksum 與 weights-only 安全載入均正常。
+- PyInstaller 6.22.3 在 3.14.4 下成功產生 `dist-314/karaoke-shen-314.exe`，
+  EXE 的 HTTP／WebSocket、FFmpeg 與 AI 就緒測試通過。
+  打包複製 `.tools` 時排除本機 Python 與套件快取，僅交付媒體 runtime。
+- 設定腳本在 Windows PowerShell 5.1 下解析正常；傳入 3.10 會在修改環境前被拒絕。
+- 本次未驗證瀏覽器播放／聽感、`htdemucs_ft` 或 CPU-only PyTorch 安裝。
+  遷移後需要關閉先前啟動的 APP，再以 `start.ps1` 啟動新環境。
+
+## 原始 v2 驗證
+
 日期：2026-10-03。
 
 - 24 項 Python 回歸測試通過：YouTube 網址與 ID 驗證、格式相容性與空值、

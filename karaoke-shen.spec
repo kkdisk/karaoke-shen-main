@@ -1,16 +1,21 @@
 # -*- mode: python ; coding: utf-8 -*-
-
-
 from PyInstaller.utils.hooks import collect_all
-ffmpeg_datas, ffmpeg_binaries, ffmpeg_imports = collect_all('imageio_ffmpeg')
-ejs_datas, ejs_binaries, ejs_imports = collect_all('yt_dlp_ejs')
+
+datas = [('web', 'web'), ('ai_worker.py', '.')]
+binaries = []
+hiddenimports = []
+tmp_ret = collect_all('imageio_ffmpeg')
+datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
+tmp_ret = collect_all('yt_dlp_ejs')
+datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
+
 
 a = Analysis(
     ['main.py'],
     pathex=[],
-    binaries=ffmpeg_binaries + ejs_binaries,
-    datas=[('web', 'web'), ('ai_worker.py', '.')] + ffmpeg_datas + ejs_datas,
-    hiddenimports=ffmpeg_imports + ejs_imports,
+    binaries=binaries,
+    datas=datas,
+    hiddenimports=hiddenimports,
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

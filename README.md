@@ -4,7 +4,7 @@
 
 ## 啟動
 
-這次已在專案內建立 `.venv`（APP）與 `.venv-ai`（AI）環境。
+APP 使用 `.venv`，AI 使用獨立的 `.venv-ai`；兩者以標準 64-bit Python 3.14 建立（不使用 free-threaded 版本）。
 原 `env` 指向已不存在的 Python，不再使用。
 
 ```powershell
@@ -15,16 +15,27 @@
 
 需要 Chrome；程式只監聽 localhost:8000。若埠號已被占用，先關閉先前的 APP。
 
-新電腦建議使用 Python 3.11，重新安裝：
+新電腦先安裝標準 64-bit Python 3.14，再執行：
 
 ```powershell
-python -m venv .venv
-.\.venv\Scripts\python.exe -m pip install -r requirements.txt
-.\.venv\Scripts\python.exe -m pip install --upgrade pip setuptools
+.\setup-app.ps1
 .\.venv\Scripts\python.exe setup_runtime.py
 .\setup-ai.ps1
 .\start.ps1
 ```
+
+已有 Python 3.10／3.11 環境時，先關閉 APP 與 AI 工作，再重建兩個 venv：
+
+```powershell
+.\setup-app.ps1 -Recreate
+.\setup-ai.ps1 -Recreate
+```
+
+`-Recreate` 會將舊環境保留為 `.venv.backup-時間`／`.venv-ai.backup-時間`，不刪除它們。
+若未指定 `-Recreate`，腳本會拒絕沿用非 3.14 的環境。
+設定腳本優先使用 `.tools/python` 內的專案專用 3.14，否則使用 `py -3.14`；
+也可傳入 `-PythonPath 'C:\指定路徑\python.exe'`。不需要移除系統的舊 Python 或修改 PATH。
+如需回復，先關閉 APP，將新環境移至另一個名稱，再將對應備份改回原名；備份環境應回到原路徑後再使用。
 
 若 Windows 應用程式控制原則阻擋新版 exe，以上 Python 啟動方式仍可使用。
 exe 的簽章或允許清單須依電腦既有管理政策處理，本專案不修改系統防護設定。
@@ -62,13 +73,17 @@ AI 支援 15 分鐘以內的非直播影片，同時製作一首；可取消目�
 研究與評估方式見 [人聲分離說明](docs/VOCAL_SEPARATION.md)。
 
 若使用自訂 AI 環境，設定 `KARAOKE_AI_PYTHON` 為該環境 python.exe 的絕對路徑。
-AI 環境使用 Python 3.10／3.11 與固定版本 PyTorch 2.10.0 CPU、Demucs 4.0.1。
-既有 AI 環境請重跑 `setup-ai.ps1` 更新。模型使用受限制的 weights-only 載入，並於每次載入前驗證官方校驗碼。
-一般 APP 的 yt-dlp 在此 Python 3.10 尚可執行，但已提示未來將移除支援；新安裝請用 3.11。
+AI 環境使用 Python 3.14、NumPy 2.3.3、PyTorch／torchaudio 2.10.0、Demucs 4.0.1。
+`setup-ai.ps1` 會以 `nvidia-smi` 自動偵測：NVIDIA 驅動 ≥ 570.65 且 GPU 為 Volta（7.0）以上時安裝 CUDA 12.8 版，否則安裝 CPU 版；
+可用 `-TorchBackend cu128` 或 `-TorchBackend cpu` 手動指定。
+APP 啟動時會自動偵測：AI 環境能執行 CUDA 就用 GPU 分離，否則用 CPU；GPU 分離失敗時自動改用 CPU 重做。
+設定 `KARAOKE_AI_DEVICE=cpu` 可強制使用 CPU。
+既有舊 Python 環境請使用 `setup-ai.ps1 -Recreate` 遷移；已為 3.14 的環境可直接重跑更新套件。
+模型使用受限制的 weights-only 載入，並於每次載入前驗證官方校驗碼；NumPy 2 相容處理僅允許固定的舊 scalar 名稱。
 
 快取在 `%LOCALAPPDATA%\ShenKaraoke\cache`，包含原影片、AI 影片、模型與每首的 `worker.log`。
 新任務開始前若現有快取超過 2GB，會要求先清理；這不是寫入過程的硬性容量上限。
-處理需要至少 2GB 可用空間。關閉 APP 後可手動刪除不需要的歌曲 ID 資料夾，模型位於 `.models`。
+處理需要至少 3GB 可用空間。關閉 APP 後可手動刪除不需要的歌曲 ID 資料夾，模型位於 `.models`。
 APP 日誌在 `%LOCALAPPDATA%\ShenKaraoke\karaoke.log`。
 YouTube 部分影片可能因來源限制而無法擷取，請選其他來源或更新 yt-dlp。
 
@@ -95,4 +110,5 @@ node tests/frontend.test.cjs
 在 exe 旁建立 `.venv-ai`，或設定 `KARAOKE_AI_PYTHON`。
 直接使用 `.spec` 打包時，需自行將 `.tools` 放在 exe 同一目錄。
 本次新版執行檔在 `dist-v2/karaoke-shen-v2.exe`，原 `dist` 保留舊版。
+Python 3.14 遷移驗證版位於 `dist-314/karaoke-shen-314.exe`；驗證範圍見 [驗證記錄](docs/VALIDATION.md)。
 在目前專案中，新版 exe 也會尋找上層專案的 `.venv-ai`。

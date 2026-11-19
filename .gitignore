@@ -4,6 +4,8 @@ build/
 dist/
 dist-v2/
 build-v2/
+build-314/
+dist-314/
 __pycache__/
 *.pyc
 .karaoke-cache/
